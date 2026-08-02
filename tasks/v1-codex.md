@@ -11,7 +11,7 @@ Proxmox VE 的 WebUI，无公网 IP 也能远程管理。MIT 协议，单仓库�
 
 ## 2. 交付物（本次任务）
 
-在 `/root/projects/pve-pilot/` 下完成：
+在仓库根目录下完成：
 
 1. `fnos/` — fnOS 应用完整目录（见 §4 结构），产出可手动安装的 `.fpk`
 2. `build/` — nginx 静态二进制构建脚本（x86_64 + aarch64）
@@ -65,7 +65,7 @@ server {
     listen       8800;                          # 透传端口（向导可改，冲突检测）
     server_name  _;
     location / {
-        proxy_pass        https://<PVE地址>:<PVE端口>;   # 默认 192.168.8.10:8006
+        proxy_pass        https://<PVE地址>:<PVE端口>;   # 示例 192.168.1.10:8006
         proxy_set_header  Host $host;                  # 必须透传，PVE 靠 Host 拼 URL
         proxy_http_version 1.1;
         proxy_set_header  Upgrade $http_upgrade;       # noVNC/控制台/日志 websocket

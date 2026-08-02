@@ -3,6 +3,7 @@ build/cache/
 build/work-*/
 build/tmp/
 build/dist/
+build/out/
 
 # nginx 二进制为构建产物（由 build/build-nginx.sh 生成）
 fnos/bin/nginx

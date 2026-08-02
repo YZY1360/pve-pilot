@@ -17,8 +17,8 @@
 #   3. proxy_ssl_verify off（PVE 8006 为自签 HTTPS，后端不校验证书）
 # ============================================================================
 
-# ---- 默认值（与 wizard 表单 initValue 保持一致）-----------------------------
-PVE_ADDR_DEFAULT="192.168.8.10"
+# ---- 默认值（与 wizard 表单 initValue 保持一致；PVE 地址无默认值，必须由向导传入）---
+PVE_ADDR_DEFAULT=""
 PVE_PORT_DEFAULT="8006"
 PROXY_PORT_DEFAULT="8006"
 
@@ -83,6 +83,9 @@ generate_nginx_conf() {
     local pve_addr="$1" pve_port="$2" proxy_port="$3"
 
     # 1) 输入校验
+    if [ -z "${pve_addr}" ]; then
+        error_exit "PVE 地址不能为空：请在应用中心的安装/配置向导中填写 PVE 地址"
+    fi
     pve_addr=$(normalize_pve_addr "${pve_addr}") || error_exit "PVE 地址不合法：${pve_addr}"
     valid_port "${pve_port}" 1 65535 || error_exit "PVE 端口不合法：${pve_port}（应为 1-65535）"
     valid_port "${proxy_port}" 1024 65535 || error_exit "透传端口不合法：${proxy_port}（应为 1024-65535）"
