@@ -2,6 +2,8 @@
 
 > [English](README.en.md) · 基于飞牛 OS（fnOS）的 Proxmox VE 远程管理应用
 
+> ⚡ **Vibe Coding 项目**：本项目由 AI 编程助手（Codex CLI）参与开发，人类负责架构决策与代码审查。
+
 通过 FN Connect 穿透链接访问自家 Proxmox VE WebUI——**无公网 IP 也能远程管理**。V1（MVP）为 PC 端原版 WebUI 全量透传。
 
 PVE 管家把 Proxmox VE 的 WebUI 装进飞牛应用商店——一个链接，远程管理。应用内置静态 nginx 反代引擎（约 5–8MB，无管理界面），通过 fnOS 原生向导填写 PVE 地址后即可访问。

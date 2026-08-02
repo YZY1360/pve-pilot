@@ -2,6 +2,8 @@
 
 > [简体中文](README.md) · A Proxmox VE remote management app for fnOS (feiniu OS)
 
+> ⚡ **Vibe Coding project**: built with AI coding agents (Codex CLI); humans own architecture decisions and code review.
+
 Access your Proxmox VE WebUI through the FN Connect tunnel — **no public IP required**. V1 (MVP) provides full passthrough of the original PC WebUI.
 
 PVE Pilot ships a built-in static nginx reverse-proxy engine (~5–8MB, no management UI). Fill in your PVE address in the native fnOS setup wizard and you get a reachable link.
