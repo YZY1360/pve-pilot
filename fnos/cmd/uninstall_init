@@ -1,4 +1,5 @@
 #!/bin/bash
-# PVE 管家：卸载前置回调（停止服务）
+# PVE 管家：卸载前置回调（uninstall_init）
+# 职责：停止服务并执行卸载前清理（stop_daemon / service_preuninst）
 . "$(dirname "$0")/installer"
-"$(basename "$0")" > "${TRIM_TEMP_LOGFILE}"
+run_lifecycle_hook "$(basename "$0")"

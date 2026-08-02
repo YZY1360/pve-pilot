@@ -24,7 +24,7 @@
 
 ## 版本覆盖
 
-默认 nginx 1.28.3（最新稳定 1.28.x）、OpenSSL 3.6.3（LTS 线）、PCRE2 10.46
+默认 nginx 1.28.3（最新稳定 1.28.x）、OpenSSL 3.6.3（LTS 线）、PCRE2 10.47
 （供 `proxy_cookie_flags ~` 正则）。可用环境变量覆盖：
 
 ```bash

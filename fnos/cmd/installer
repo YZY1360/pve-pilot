@@ -1,6 +1,14 @@
 #!/bin/bash
-# PVE 管家：生命周期回调入口加载器
-# 加载 common（框架）与 service-setup（应用逻辑），并恢复上次保存的向导变量
+# PVE 管家（pve-pilot）— 生命周期回调加载器
+#
+# 职责：
+#   1. 加载公共框架 common（环境自检 + 生命周期调度 + 服务原语）
+#   2. 加载应用实现 service-setup（覆盖 service_* 钩子）
+#   3. 恢复上次持久化的向导变量（升级/异常恢复场景）
+#   4. 提供 run_lifecycle_hook：按脚本名执行对应的生命周期函数
+#
+# 各回调脚本（install_callback 等）source 本文件后调用 run_lifecycle_hook，
+# 函数名与脚本名一一对应，由 fnOS 应用中心按阶段触发。
 
 COMMON="$(dirname "$0")/common"
 if [ -r "${COMMON}" ]; then
@@ -14,4 +22,15 @@ fi
 
 # 恢复持久化的向导变量（升级/异常恢复场景）
 load_variables_from_file "${INST_VARIABLES}"
-call_func "initialize_variables" 2>/dev/null || true
+call_func initialize_variables 2>/dev/null || true
+
+# 执行以脚本名命名的生命周期函数；stdout 重定向到 TRIM_TEMP_LOGFILE 供前端展示
+run_lifecycle_hook() {
+    local hook="$1"
+    if declare -F "${hook}" >/dev/null 2>&1; then
+        "${hook}" > "${TRIM_TEMP_LOGFILE}"
+        exit $?
+    fi
+    echo "ERROR: 未定义生命周期函数 ${hook}" >&2
+    exit 1
+}

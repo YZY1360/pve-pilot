@@ -1,4 +1,5 @@
 #!/bin/bash
-# PVE 管家：安装前置回调（加载框架后执行 install_init）
+# PVE 管家：安装前置回调（install_init）
+# 职责：安装开始前的环境校验与准备（validate_preinst / service_preinst）
 . "$(dirname "$0")/installer"
-"$(basename "$0")" > "${TRIM_TEMP_LOGFILE}"
+run_lifecycle_hook "$(basename "$0")"

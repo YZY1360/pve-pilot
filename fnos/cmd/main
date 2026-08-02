@@ -1,5 +1,10 @@
 #!/bin/bash
-# PVE 管家：应用中心服务控制入口（start / stop / restart / status / log）
+# PVE 管家（pve-pilot）— 服务控制入口
+#
+# 供 fnOS 应用中心执行 start / stop / restart / status，也可命令行手动调用：
+#   cmd/main start | stop | restart | status | log [行数]
+#
+# 服务（nginx 透传引擎）以"daemon off"前台方式运行，进程由公共框架托管。
 
 COMMON="$(dirname "$0")/common"
 if [ -r "${COMMON}" ]; then
@@ -39,10 +44,9 @@ case "$1" in
         if [ -f "${LOG_FILE}" ]; then
             tail -n "${LINES}" "${LOG_FILE}"
             exit 0
-        else
-            echo "日志文件不存在: ${LOG_FILE}"
-            exit 1
         fi
+        echo "日志文件不存在: ${LOG_FILE}"
+        exit 1
         ;;
     *)
         echo "用法: $0 {start|stop|restart|status|log [行数]}"

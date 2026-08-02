@@ -25,7 +25,7 @@ OUT_DIR="${BUILD_DIR}/out"
 
 NGINX_VERSION="${NGINX_VERSION:-1.28.3}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.6.3}"
-PCRE2_VERSION="${PCRE2_VERSION:-10.46}"
+PCRE2_VERSION="${PCRE2_VERSION:-10.47}"
 
 NGINX_URL="https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 OPENSSL_URL="https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"

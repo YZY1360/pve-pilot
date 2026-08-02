@@ -1,80 +1,87 @@
 #!/bin/bash
 # ============================================================================
-# PVE 管家（pve-pilot）fnOS 生命周期公共框架
+# PVE 管家（pve-pilot）— fnOS 生命周期公共框架
 # ----------------------------------------------------------------------------
-# 职责：
-#   1. 校验 fnOS 生命周期环境变量（TRIM_* 系列），防止误操作
-#   2. 提供安装/卸载/升级/配置回调的统一调度（install_* / config_* / ...）
-#   3. 提供后台服务（nginx）的 start / stop / status 原语
-#   4. 各生命周期钩子（service_*）由 cmd/service-setup 覆盖实现
+# 本文件为独立实现，仅依赖 fnOS 平台公开的生命周期约定：
+#   - 环境变量：TRIM_APPDEST（应用安装目录，只读）、TRIM_PKGVAR（应用数据
+#     目录，可写）、TRIM_APPNAME（应用标识）
+#   - 回调机制：fnOS 应用中心在安装 / 配置 / 卸载 / 升级四个阶段依次调用
+#     cmd/ 下 *_init（前置）与 *_callback（后置）脚本
+#   - 服务原语：start / stop / status，由 cmd/main 对外暴露
 #
-# 参考实现：conversun/fnos-apps 的 shared/cmd/common（同契约，本文件为裁剪+注释版）
+# 职责：
+#   1. 运行环境自检（TRIM_* 变量、数据路径合法性）
+#   2. 生命周期回调的统一调度与日志记录
+#   3. 安装向导输入变量的落盘与恢复
+#   4. 后台服务（nginx）的 start / stop / status 原语
+#
+# 应用专属逻辑（service_* 钩子）由 cmd/service-setup 覆盖实现。
 # ============================================================================
 
+# ---- 文件操作工具（统一变量，便于审计与替换）-----------------------------------
 MV="/bin/mv -f"
 RM="/bin/rm -rf"
 CP="/bin/cp -rfp"
 MKDIR="/bin/mkdir -p"
 LN="/bin/ln -nsf"
 
-# ---- 数据路径安全检查 ------------------------------------------------------
-# 生产环境 TRIM_PKGVAR 指向应用数据卷（/vol[x]/@appdata/<appname>）或系统盘
-# 应用数据目录（/usr/local/apps/@appdata/<appname>）。此处拒绝其他路径，防止
-# 脚本误删/误写系统目录。
+# ---- 运行环境自检 ---------------------------------------------------------------
+# 数据目录必须指向 fnOS 分配的应用数据卷，防止脚本误写系统目录。
 if [ -z "${TRIM_PKGVAR:-}" ]; then
-    echo "ERROR: TRIM_PKGVAR 未设置，无法确定应用数据存储路径" >&2
+    echo "ERROR: 环境变量 TRIM_PKGVAR 未设置，无法确定应用数据目录" >&2
     exit 1
 fi
 case "${TRIM_PKGVAR}" in
-    /vol*) ;;                              # 普通安装：fnOS 数据盘
-    /usr/local/apps/@appdata/*) ;;         # root 安装：系统盘应用数据
+    /vol/*) ;;                              # 常规安装：fnOS 数据盘 /vol[x]/@appdata/<appname>
+    /usr/local/apps/@appdata/*) ;;          # root 安装：系统盘应用数据目录
     *)
-        # 本地开发/验证模式：设置 PVE_PILOT_DEV=1 时跳过严格路径校验
+        # 本地开发/验证模式：显式设置 PVE_PILOT_DEV=1 时放行任意路径
         if [ "${PVE_PILOT_DEV:-0}" = "1" ]; then
-            echo "WARN: PVE_PILOT_DEV=1，跳过 TRIM_PKGVAR 路径校验（仅限本地验证）" >&2
+            echo "WARN: PVE_PILOT_DEV=1，跳过数据路径校验（仅限本地验证）" >&2
         else
-            echo "ERROR: TRIM_PKGVAR=${TRIM_PKGVAR} 不是有效的应用数据路径，拒绝继续" >&2
+            echo "ERROR: TRIM_PKGVAR=${TRIM_PKGVAR} 不是合法的应用数据路径，拒绝继续" >&2
             exit 1
         fi
         ;;
 esac
 ${MKDIR} "${TRIM_PKGVAR}" 2>/dev/null || true
 
-# ---- fnOS 约定路径 ----------------------------------------------------------
-INST_ETC="/var/apps/${TRIM_APPNAME}/etc"
-INST_VARIABLES="${INST_ETC}/installer-variables"
-INST_LOG="/var/log/apps/${TRIM_APPNAME}.log"
+# ---- fnOS 平台约定路径 -------------------------------------------------------------
+INST_ETC="/var/apps/${TRIM_APPNAME}/etc"         # 应用配置目录（向导变量存档所在）
+INST_VARIABLES="${INST_ETC}/installer-variables" # 向导变量持久化文件（升级/恢复时回读）
+INST_LOG="/var/log/apps/${TRIM_APPNAME}.log"     # 平台侧安装/配置日志
 
-LOG_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.log"   # 服务运行日志
-PID_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.pid"   # 服务 PID 文件
+LOG_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.log"    # 服务运行日志（stdout/stderr 重定向）
+PID_FILE="${TRIM_PKGVAR}/${TRIM_APPNAME}.pid"    # 框架维护的服务进程 PID 文件
 
-SVC_CWD="${TRIM_PKGVAR}"
-SVC_BACKGROUND=y
-SVC_WRITE_PID=y
-SVC_WAIT_TIMEOUT=15
-DNAME="${TRIM_APPNAME}"
+SVC_CWD="${TRIM_PKGVAR}"       # 服务工作目录
+SVC_BACKGROUND=y                # 服务以后台方式启动，由框架接管
+SVC_WRITE_PID=y                 # 启动成功后写入 PID 文件
+SVC_WAIT_TIMEOUT=15             # 启动/停止等待时间（秒）
+DNAME="${TRIM_APPNAME}"         # 服务显示名（日志用）
 
-# ---- 日志与错误 --------------------------------------------------------------
-# install_log: 写入安装/配置过程的日志（fnOS 会捕获 stderr 到安装日志）
+# ---- 日志与错误处理 -------------------------------------------------------------------
+# install_log：写入安装/配置过程日志（fnOS 捕获 stderr 作为安装日志）
 install_log() {
     echo -e "$(date +'%Y/%m/%d %H:%M:%S')\t$*" >&2
 }
 
-# error_exit: 将错误信息写入 TRIM_TEMP_LOGFILE（fnOS 前端会弹窗展示）后退出
+# error_exit：把错误信息写入 TRIM_TEMP_LOGFILE（fnOS 前端弹窗展示）后终止
 error_exit() {
     local msg="$1"
     if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
-        echo "$msg" > "${TRIM_TEMP_LOGFILE}"
+        echo "${msg}" > "${TRIM_TEMP_LOGFILE}"
     fi
-    echo "ERROR: $msg" >&2
+    echo "ERROR: ${msg}" >&2
     exit 1
 }
 
+# log_step：生命周期步骤日志（附带平台上下文变量）
 log_step() {
-    install_log "===> Step $1. STATUS=${TRIM_APP_STATUS:-} USER=${USER:-} GROUP=${GROUP:-}"
+    install_log "===> Step ${1}. STATUS=${TRIM_APP_STATUS:-} USER=${USER:-} GROUP=${GROUP:-}"
 }
 
-# call_func: 若函数已定义则调用并记录起止日志
+# call_func：钩子函数已定义则执行并记录起止日志；未定义视为成功（平台可选钩子）
 call_func() {
     local fn="$1"
     if declare -F "${fn}" >/dev/null 2>&1; then
@@ -82,13 +89,13 @@ call_func() {
         "${fn}"
         local rc=$?
         install_log "End ${fn} (rc=${rc})"
-        return ${rc}
+        return "${rc}"
     fi
     return 0
 }
 
-# ---- 向导变量存取 ------------------------------------------------------------
-# load_variables_from_file: 逐行读取 KEY=VALUE 文件并 export（跳过空行/注释）
+# ---- 向导变量存取 -------------------------------------------------------------------------
+# load_variables_from_file：逐行读取 KEY=VALUE 文件并 export（跳过空行与 # 注释）
 load_variables_from_file() {
     local file="$1"
     if [ -n "${file}" ] && [ -r "${file}" ]; then
@@ -97,17 +104,15 @@ load_variables_from_file() {
             case "${line}" in
                 \#*) continue ;;
             esac
-            local key="${line%%=*}"
-            local value="${line#*=}"
-            export "${key}=${value}"
+            export "${line%%=*}=${line#*=}"
         done < "${file}"
     fi
 }
 
-# save_wizard_variables: 持久化向导中的通用变量（升级/恢复时使用）
+# save_wizard_variables：把向导通用变量持久化到 installer-variables
 save_wizard_variables() {
     if [ -e "${INST_VARIABLES}" ]; then
-        $RM "${INST_VARIABLES}"
+        ${RM} "${INST_VARIABLES}"
     fi
     if [ -n "${GROUP:-}" ]; then
         echo "GROUP=${GROUP}" >> "${INST_VARIABLES}"
@@ -117,16 +122,16 @@ save_wizard_variables() {
     fi
 }
 
-# sync_var_folder: 安装时将包内 var/ 种子文件同步到数据目录（本项目 var/ 为
-# 运行时动态内容、不入 fpk，因此通常无种子文件，函数为空操作）
+# sync_var_folder：安装时把包内 var/ 种子文件同步到数据目录（本项目 var/ 为运行时
+# 动态内容、不入 fpk，通常无种子文件，本函数为空操作）
 sync_var_folder() {
     if [ -d "${TRIM_APPDEST}/var" ] && [ -n "$(ls -A "${TRIM_APPDEST}/var" 2>/dev/null)" ]; then
-        install_log "同步包内 var/ 种子文件到 ${TRIM_PKGVAR}"
+        install_log "同步 var/ 种子文件: ${TRIM_APPDEST}/var -> ${TRIM_PKGVAR}"
         /bin/rsync -avh --ignore-existing "${TRIM_APPDEST}/var/" "${TRIM_PKGVAR}" 2>/dev/null || true
     fi
 }
 
-# ---- 生命周期钩子默认实现（service-setup 覆盖）-------------------------------
+# ---- 生命周期钩子默认实现（service-setup 按需覆盖）-----------------------------------------
 validate_preinst()    { :; }
 service_preinst()     { :; }
 service_postinst()    { :; }
@@ -142,34 +147,35 @@ service_postconfig()  { :; }
 service_prestart()    { :; }
 service_poststop()    { :; }
 
-# ---- 生命周期调度 ------------------------------------------------------------
+# ---- 生命周期调度 -----------------------------------------------------------------------------
+# 各阶段脚本（cmd/install_init 等）通过 cmd/installer 加载本框架后，以脚本名调用下列函数。
 install_init() {
-    log_step "install_init"
-    call_func "validate_preinst"
-    call_func "service_preinst"
+    log_step install_init
+    call_func validate_preinst
+    call_func service_preinst
     exit 0
 }
 
 install_callback() {
-    log_step "install_callback"
-    call_func "save_wizard_variables"
+    log_step install_callback
+    call_func save_wizard_variables
     sync_var_folder
-    call_func "service_postinst"
+    call_func service_postinst
     echo "安装日志: ${INST_LOG}" >> "${LOG_FILE}" 2>/dev/null || true
     exit 0
 }
 
 uninstall_init() {
-    log_step "uninstall_init"
+    log_step uninstall_init
     stop_daemon
-    call_func "service_preuninst"
+    call_func service_preuninst
     exit 0
 }
 
 uninstall_callback() {
-    log_step "uninstall_callback"
-    call_func "service_postuninst"
-    # 用户勾选"删除数据"时清理应用数据目录
+    log_step uninstall_callback
+    call_func service_postuninst
+    # 用户勾选"删除数据"时清理应用数据目录（保留目录本身，避免平台残留）
     if [ "${wizard_delete_data:-false}" = "true" ]; then
         install_log "按用户选择删除应用数据..."
         [ -d "${TRIM_PKGVAR}" ] && find "${TRIM_PKGVAR}" -mindepth 1 -delete 2>/dev/null || true
@@ -179,41 +185,42 @@ uninstall_callback() {
 }
 
 upgrade_init() {
-    log_step "upgrade_init"
-    call_func "validate_preupgrade"
+    log_step upgrade_init
+    call_func validate_preupgrade
     stop_daemon
-    call_func "service_preupgrade"
-    call_func "service_save"
+    call_func service_preupgrade
+    call_func service_save
     exit 0
 }
 
 upgrade_callback() {
-    log_step "upgrade_callback"
-    call_func "service_restore"
-    call_func "service_postupgrade"
+    log_step upgrade_callback
+    call_func service_restore
+    call_func service_postupgrade
     exit 0
 }
 
 config_init() {
-    log_step "config_init"
-    call_func "service_preconfig"
+    log_step config_init
+    call_func service_preconfig
     exit 0
 }
 
 config_callback() {
-    log_step "config_callback"
-    call_func "service_postconfig"
+    log_step config_callback
+    call_func service_postconfig
     exit 0
 }
 
-# ---- 守护进程原语（nginx 以前台方式运行，由 fnOS 生命周期管理）---------------
+# ---- 守护进程原语（nginx 以前台方式运行，由本框架托管）-----------------------------------------
+# daemon_status：PID 文件中的进程全部存活返回 0；文件缺失或进程已退出返回 1
 daemon_status() {
     [ -f "${PID_FILE}" ] || return 1
     local pid
     while read -r pid; do
         [ -n "${pid}" ] || continue
         if ! kill -0 "${pid}" 2>/dev/null; then
-            # PID 已失效：清理 PID 文件
+            # PID 已失效：清理 PID 文件后报告停止
             rm -f "${PID_FILE}" 2>/dev/null
             return 1
         fi
@@ -221,10 +228,10 @@ daemon_status() {
     return 0
 }
 
+# wait_for_status：轮询等待达到期望状态（$1=0 运行 / 1 停止，$2=超时秒数，$3=指定 pid）
 wait_for_status() {
-    # $1=期望状态(0 运行/1 停止) $2=超时秒数 $3=指定 pid（可选）
-    local expect="$1" timeout="${2:-15}" pid="${3:-}" i=0
-    while [ "${i}" -lt "${timeout}" ]; do
+    local expect="$1" timeout="${2:-15}" pid="${3:-}" elapsed=0
+    while [ "${elapsed}" -lt "${timeout}" ]; do
         if [ -n "${pid}" ]; then
             kill -0 "${pid}" 2>/dev/null
             [ $? -eq "${expect}" ] && return 0
@@ -232,18 +239,19 @@ wait_for_status() {
             daemon_status
             [ $? -eq "${expect}" ] && return 0
         fi
-        i=$((i + 1))
+        elapsed=$((elapsed + 1))
         sleep 1
     done
     return 1
 }
 
+# start_daemon：执行 SERVICE_COMMAND 后台启动服务并等待其就绪
 start_daemon() {
     if daemon_status; then
-        install_log "${DNAME} 已在运行"
+        install_log "${DNAME} 已在运行，跳过启动"
         return 0
     fi
-    call_func "service_prestart" || return 1
+    call_func service_prestart || return 1
     [ -n "${SERVICE_COMMAND:-}" ] || error_exit "SERVICE_COMMAND 未定义（service-setup 未正确加载）"
     cd "${SVC_CWD}" 2>/dev/null || true
     install_log "启动 ${DNAME}: ${SERVICE_COMMAND}"
@@ -259,6 +267,7 @@ start_daemon() {
     return 1
 }
 
+# stop_daemon：向 PID 文件中的进程发 TERM，超时未退出再发 KILL
 stop_daemon() {
     if [ -r "${PID_FILE}" ]; then
         local pid
@@ -268,12 +277,12 @@ stop_daemon() {
                 install_log "停止 ${DNAME} (pid=${pid})"
                 kill -TERM "${pid}" 2>/dev/null || true
                 wait_for_status 1 "${SVC_WAIT_TIMEOUT}" "${pid}" || {
-                    install_log "进程未响应 TERM，发送 KILL"
+                    install_log "进程未在 ${SVC_WAIT_TIMEOUT}s 内退出，发送 KILL"
                     kill -KILL "${pid}" 2>/dev/null || true
                 }
             fi
         done < "${PID_FILE}"
         rm -f "${PID_FILE}" 2>/dev/null
     fi
-    call_func "service_poststop"
+    call_func service_poststop
 }

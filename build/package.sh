@@ -2,12 +2,13 @@
 # ============================================================================
 # PVE 管家（pve-pilot）— .fpk 打包脚本（tar 手动打包方式）
 # ----------------------------------------------------------------------------
-# 依据任务书 §6/§7 与 conversun build-fpk.sh 的包结构（自包含实现）：
+# 依据 fnOS 应用包结构与 fnmake 打包流程约定（自包含实现）：
 #
 #   pvepilot_<version>_<arch>.fpk （tar.gz）
 #   ├── manifest          # version/platform/checksum 由本脚本按目标写入
 #   ├── pvepilot.sc
 #   ├── ICON.PNG / ICON_256.PNG
+#   ├── LICENSE / THIRD-PARTY-NOTICES.md   # 开源合规文件
 #   ├── ui/               # ui/config + ui/images/256.png（由 ICON_256 生成）
 #   ├── config/           # privilege / resource
 #   ├── wizard/           # install / config
@@ -104,6 +105,8 @@ check "${FNOS_DIR}/manifest"
 check "${FNOS_DIR}/pvepilot.sc"
 check "${FNOS_DIR}/ICON.PNG"
 check "${FNOS_DIR}/ICON_256.PNG"
+check "${ROOT}/LICENSE"
+check "${ROOT}/THIRD-PARTY-NOTICES.md"
 check "${FNOS_DIR}/cmd/common"
 check "${FNOS_DIR}/cmd/installer"
 check "${FNOS_DIR}/cmd/main"
@@ -147,7 +150,7 @@ cp -a "${FNOS_DIR}/ui/." "${APP_ROOT}/ui/"
 chmod +x "${APP_ROOT}/bin/nginx"
 
 APP_TGZ="${TMP}/app.tgz"
-# 与 conversun build-fpk.sh 一致：不带 "./" 前缀打包，便于 fnOS 解析
+# 不带 "./" 前缀打包（fnOS 应用中心解包约定），成员路径即 fpk 根下相对路径
 (cd "${APP_ROOT}" && tar -czf "${APP_TGZ}" *)
 CHECKSUM="$(md5sum "${APP_TGZ}" | cut -d' ' -f1)"
 echo "[INFO] app.tgz: $(du -h "${APP_TGZ}" | cut -f1)，checksum=${CHECKSUM}"
@@ -158,6 +161,7 @@ mkdir -p "${PKG_ROOT}/cmd" "${PKG_ROOT}/ui/images"
 cp -f "${APP_TGZ}" "${PKG_ROOT}/app.tgz"
 cp -f "${FNOS_DIR}/pvepilot.sc" "${PKG_ROOT}/"
 cp -f "${FNOS_DIR}/ICON.PNG" "${FNOS_DIR}/ICON_256.PNG" "${PKG_ROOT}/"
+cp -f "${ROOT}/LICENSE" "${ROOT}/THIRD-PARTY-NOTICES.md" "${PKG_ROOT}/"
 cp -f "${PKG_ROOT}/ICON_256.PNG" "${PKG_ROOT}/ui/images/256.png"
 cp -a "${FNOS_DIR}/cmd/." "${PKG_ROOT}/cmd/"
 cp -a "${FNOS_DIR}/config/." "${PKG_ROOT}/config/"

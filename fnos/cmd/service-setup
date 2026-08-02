@@ -1,22 +1,24 @@
 #!/bin/bash
 # ============================================================================
-# PVE 管家（pve-pilot）应用生命周期实现（service-setup）
+# PVE 管家（pve-pilot）— 应用生命周期实现（service-setup）
 # ----------------------------------------------------------------------------
-# 覆盖 common 框架中的 service_* 钩子：
+# 覆盖公共框架 common 中的 service_* 钩子：
 #   - 安装（service_postinst）：按向导输入生成 nginx 透传配置
 #   - 配置（service_postconfig）：重写配置并重启服务
-#   - 启动（service_prestart）：配置缺失时兜底生成
+#   - 启动（service_prestart）：配置缺失时按已保存设置兜底生成
 #   - 卸载/停止（service_preuninst / service_poststop）：安全终止 nginx
+#   - 升级（service_postupgrade）：恢复运行时目录，配置缺失时兜底重建
 #
-# 运行时文件（nginx.conf / logs / tmp / pid）全部位于 ${TRIM_PKGVAR}，
-# 二进制与 mime.types 位于 ${TRIM_APPDEST}（app.tgz 解包目录）。
+# 运行时文件（nginx.conf / settings / logs / tmp / pid）全部位于
+# ${TRIM_PKGVAR}；nginx 二进制与 mime.types 位于 ${TRIM_APPDEST}。
 #
-# 核心设计约束（勿改，见任务书 §3/§5）：
-#   1. 根路径全量透传（PVE 不支持子目录）
+# 核心设计约束：
+#   1. 根路径全量透传（PVE WebUI 不支持子目录）
 #   2. Host 头必须透传（否则登录后白屏/重定向循环）
 #   3. proxy_ssl_verify off（PVE 8006 为自签 HTTPS，后端不校验证书）
-#   4. 透传 X-Forwarded-Proto 并剥离 Secure cookie 标志（PVE 在 HTTPS 下设置
-#      Secure cookie，本地 HTTP 访问时浏览器不存储；见 ADR：Secure cookie 修复）
+#   4. 透传 X-Forwarded-Proto 并剥离 Secure cookie 标志：PVE 在 HTTPS 下
+#      写入带 Secure 属性的 cookie，若不经处理，用户在 HTTP 侧访问时浏览器
+#      不会保存这些 cookie，导致登录态失效。见 Secure cookie 修复 ADR。
 # ============================================================================
 
 # ---- 默认值（与 wizard 表单 initValue 保持一致；PVE 地址无默认值，必须由向导传入）---
@@ -26,17 +28,17 @@ PROXY_PORT_DEFAULT="8006"
 
 # ---- 运行时路径 --------------------------------------------------------------
 NGINX_BIN="${TRIM_APPDEST}/bin/nginx"
-PVE_CONF="${TRIM_PKGVAR}/nginx.conf"
+PVE_CONF="${TRIM_PKGVAR}/nginx.conf"        # 生成的透传配置
 PVE_SETTINGS="${TRIM_PKGVAR}/settings"      # 最近一次向导输入（升级/兜底恢复用）
 PVE_LOG_DIR="${TRIM_PKGVAR}/logs"
 PVE_TMP_DIR="${TRIM_PKGVAR}/tmp"
 PVE_PID="${TRIM_PKGVAR}/nginx.pid"
 
-# 服务启动命令：nginx 前台运行（daemon off），由生命周期框架管理进程
+# 服务启动命令：nginx 前台运行（daemon off），进程由公共框架托管
 SERVICE_COMMAND="${NGINX_BIN} -c ${PVE_CONF} -e ${PVE_LOG_DIR}/error.log -g 'daemon off;'"
 
 # ---- 输入校验 ------------------------------------------------------------------
-# 校验端口是否为 min-max 之间的纯数字
+# valid_port：校验端口为 min-max 之间的纯数字
 valid_port() {
     local port="$1" min="$2" max="$3"
     case "${port}" in
@@ -45,10 +47,9 @@ valid_port() {
     [ "${port}" -ge "${min}" ] 2>/dev/null && [ "${port}" -le "${max}" ] 2>/dev/null
 }
 
-# 校验 PVE 地址：仅允许 IP / 主机名 / [IPv6] 字符，去掉可能的协议前缀
+# normalize_pve_addr：容忍协议前缀与路径，只保留 IP / 主机名 / [IPv6]
 normalize_pve_addr() {
     local addr="$1"
-    # 容忍用户误填协议前缀（向导已拦截，这里兜底处理）
     addr="${addr#https://}"
     addr="${addr#http://}"
     addr="${addr%%/*}"
@@ -58,14 +59,14 @@ normalize_pve_addr() {
     echo "${addr}"
 }
 
-# 端口冲突检测：监听中的端口视为冲突（本应用重启前已 stop，不受自身影响）
+# port_in_use：检测端口是否已被监听（重启前旧服务已停止，不受本应用自身影响）
 port_in_use() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
         ss -ltnH "sport = :${port}" 2>/dev/null | grep -q . && return 0
         return 1
     fi
-    # 无 ss 时退化为解析 /proc/net/tcp{,6}（本地端口为小端十六进制）
+    # 无 ss 时退化为解析 /proc/net/tcp{,6}（本地端口以小端十六进制存储）
     local hex hexl
     hex=$(printf '%X' "${port}")
     hexl=$(printf '%x' "${port}")
@@ -79,8 +80,8 @@ port_in_use() {
 }
 
 # ---- 配置生成 ------------------------------------------------------------------
-# 按向导输入生成完整 nginx.conf（worker/events/http 骨架 + 透传 server 块）
-# 生成前做输入校验与端口冲突检测，失败时 error_exit（fnOS 前端展示错误）
+# generate_nginx_conf：按向导输入生成完整 nginx.conf
+# （worker/events/http 骨架 + 透传 server 块），并持久化本次输入到 settings
 generate_nginx_conf() {
     local pve_addr="$1" pve_port="$2" proxy_port="$3"
 
@@ -92,7 +93,7 @@ generate_nginx_conf() {
     valid_port "${pve_port}" 1 65535 || error_exit "PVE 端口不合法：${pve_port}（应为 1-65535）"
     valid_port "${proxy_port}" 1024 65535 || error_exit "透传端口不合法：${proxy_port}（应为 1024-65535）"
 
-    # 2) 端口冲突检测（仅检测透传端口；PVE 端口在远端宿主机，本地无法检测）
+    # 2) 端口冲突检测（仅检测本地透传端口；PVE 端口在远端宿主机，本地无法检测）
     if port_in_use "${proxy_port}"; then
         error_exit "透传端口 ${proxy_port} 已被其他服务占用，请更换端口"
     fi
@@ -108,7 +109,7 @@ generate_nginx_conf() {
             ;;
     esac
 
-    # 4) 生成配置（\ 转义保留 $host 等 nginx 内置变量原样写入）
+    # 4) 生成配置（\$ 转义保留 nginx 内置变量原样写入）
     ${MKDIR} "${PVE_LOG_DIR}" "${PVE_TMP_DIR}" 2>/dev/null || true
     cat > "${PVE_CONF}" <<EOF
 # PVE 管家（pve-pilot）nginx 透传配置
@@ -168,7 +169,7 @@ EOF
     chmod 644 "${PVE_SETTINGS}" 2>/dev/null || true
 }
 
-# 从持久化 settings 文件恢复上次输入（无文件时用默认值）
+# load_saved_settings：从 settings 文件恢复上次输入（无文件时保持现有环境变量）
 load_saved_settings() {
     if [ -r "${PVE_SETTINGS}" ]; then
         while IFS= read -r line; do
@@ -205,7 +206,7 @@ service_postconfig() {
     start_daemon || error_exit "服务重启失败，请查看应用日志"
 }
 
-# 启动前钩子：配置缺失时用最近设置（或默认值）兜底生成
+# 启动前钩子：确保运行时目录存在；配置缺失时用已保存设置兜底生成
 service_prestart() {
     ${MKDIR} "${PVE_LOG_DIR}" "${PVE_TMP_DIR}" 2>/dev/null || true
     if [ ! -f "${PVE_CONF}" ]; then
@@ -218,7 +219,7 @@ service_prestart() {
     fi
 }
 
-# 停止后钩子：兜底清理（只匹配本应用数据目录下的 nginx 进程，避免误杀系统 nginx）
+# 停止后钩子：兜底清理本应用数据目录下的 nginx 进程（避免误杀系统 nginx）
 service_poststop() {
     if command -v pkill >/dev/null 2>&1; then
         pkill -f "nginx.*${TRIM_PKGVAR}" 2>/dev/null || true
@@ -232,7 +233,7 @@ service_preuninst() {
     service_poststop
 }
 
-# 升级回调：配置/数据目录保留，仅确认运行时目录存在
+# 升级回调：配置/数据目录保留，确认运行时目录存在；配置缺失时兜底重建
 service_postupgrade() {
     ${MKDIR} "${PVE_LOG_DIR}" "${PVE_TMP_DIR}" 2>/dev/null || true
     if [ ! -f "${PVE_CONF}" ]; then

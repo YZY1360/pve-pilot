@@ -8,10 +8,13 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   NGINX_VERSION: 1.28.3
   OPENSSL_VERSION: 3.6.3
-  PCRE2_VERSION: 10.46
+  PCRE2_VERSION: "10.47"
 
 jobs:
   build:
@@ -36,7 +39,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential curl tar patch file
           if [ "${{ matrix.arch }}" = "arm" ]; then
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           fi
 
       - name: Cache source downloads
@@ -49,11 +53,14 @@ jobs:
         run: ./build/build-nginx.sh --arch ${{ matrix.arch }}
 
       # 用新编译的 x86 二进制对安装模板生成的 nginx.conf 做语法校验
-      # （Secure cookie 修复的 proxy_cookie_flags ~ 依赖 PCRE2，须由新二进制解析）；
-      # arm 二进制无法在 x86 runner 上执行，语法校验只在 x86 job 做一次即可
+      # （Secure cookie 修复的 proxy_cookie_flags ~ 依赖 PCRE2，须由新二进制解析；
+      #   同时确认 -V 输出包含 PCRE2，证明静态链接成功）；
+      # arm 二进制无法在 x86 runner 上执行，该校验只在 x86 job 做一次即可
       - name: Validate generated nginx config (${{ matrix.arch }})
         if: matrix.arch == 'x86'
         run: |
+          ${{ matrix.nginx_bin }} -V 2>&1 | grep -qi 'pcre2' \
+            || { echo "FAIL: nginx 未编译进 PCRE2"; exit 1; }
           export PVE_PILOT_DEV=1
           export TRIM_APPDEST="$PWD/fnos"
           export TRIM_PKGVAR="$PWD/build/tmp/ci-nginx-var"
