@@ -219,6 +219,33 @@ for cb in install_init config_init upgrade_init upgrade_callback uninstall_init;
     fi
 done
 
+# 模拟 0.1.2 → 0.1.3 升级场景（fnOS 升级不补齐新增的 ui/images 目录，手机 App
+# 图标缺失）：service_postupgrade 应从包内 ICON_256.PNG 兜底复制 256.png
+rm -rf "${APP_DEST}/ui/images"
+"${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
+ICON="${APP_DEST}/ui/images/256.png"
+[ -f "${ICON}" ] || { echo "FAIL: service_postupgrade 未补齐 ui/images/256.png"; exit 1; }
+cmp -s "${ICON}" "${APP_DEST}/ICON_256.PNG" \
+    || { echo "FAIL: ui/images/256.png 与 ICON_256.PNG 内容不一致"; exit 1; }
+[ "$(stat -c %a "${ICON}")" = "644" ] || { echo "FAIL: 256.png 权限非 644"; exit 1; }
+[ "$(stat -c %a "${APP_DEST}/ui/images")" = "755" ] \
+    || { echo "FAIL: ui/images 目录权限非 755"; exit 1; }
+[ "$(stat -c %u:%g "${ICON}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
+    || { echo "FAIL: 256.png owner 与 ui/config 不一致"; exit 1; }
+echo "    [OK]   service_postupgrade 兜底生成 ui/images/256.png（644/755，owner 与 ui/config 一致）"
+
+# service_prestart 兜底：再次删除后 main start 也应补齐，且已存在时不覆盖（幂等）
+rm -rf "${APP_DEST}/ui/images"
+"${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
+[ -f "${ICON}" ] || { echo "FAIL: service_prestart 未补齐 ui/images/256.png"; exit 1; }
+"${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
+printf 'dirty' >> "${ICON}"
+"${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
+grep -q "dirty" "${ICON}" \
+    || { echo "FAIL: 已存在的图标被重新生成（应幂等跳过）"; exit 1; }
+"${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
+echo "    [OK]   service_prestart 兜底补齐且幂等（已存在不覆盖）"
+
 # 模拟升级后配置丢失：删除 nginx.conf，main start 应从 settings 兜底重建
 rm -f "${TRIM_PKGVAR}/nginx.conf"
 "${ROOT}/fnos/cmd/main" start >/dev/null 2>&1

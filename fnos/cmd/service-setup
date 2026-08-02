@@ -5,9 +5,9 @@
 # 覆盖公共框架 common 中的 service_* 钩子：
 #   - 安装（service_postinst）：按向导输入生成 nginx 透传配置
 #   - 配置（service_postconfig）：重写配置并重启服务
-#   - 启动（service_prestart）：配置缺失时按已保存设置兜底生成
+#   - 启动（service_prestart）：配置缺失时按已保存设置兜底生成；手机 App 图标缺失时补全
 #   - 卸载/停止（service_preuninst / service_poststop）：安全终止 nginx
-#   - 升级（service_postupgrade）：恢复运行时目录，配置缺失时兜底重建
+#   - 升级（service_postupgrade）：恢复运行时目录，配置缺失时兜底重建；补齐手机 App 图标
 #
 # 运行时文件（nginx.conf / settings / logs / tmp / pid）全部位于
 # ${TRIM_PKGVAR}；nginx 二进制与 mime.types 位于 ${TRIM_APPDEST}。
@@ -26,6 +26,10 @@
 #      cookie 无效，保留仅用于剥离后端下发的 Secure 标志（双保险，纯 HTTP 降级时必需）。
 #   5. 透传端口由向导可改：配置生成后把实际端口同步写回 ${TRIM_APPDEST}/ui/config，
 #      保证桌面入口 / FN Connect 指向正确端口（声明永远跟随实际）。
+#   6. 手机 App 应用列表图标（ui/images/256.png）由生命周期钩子兜底补全：fnOS 升级
+#      流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 ui/images 缺失，手机 App 无图标；
+#      Web 端用框架注册图标 ICON.PNG，升级会更新故不受影响）。升级回调与启动钩子中
+#      从包内 ICON_256.PNG 复制补齐（幂等，失败仅告警不阻塞）。
 # ============================================================================
 
 # ---- 默认值（与 wizard 表单 initValue 保持一致；PVE 地址无默认值，必须由向导传入）---
@@ -179,6 +183,50 @@ sync_ui_config_port() {
     fi
     install_log "警告: 同步 ${ui_config} 端口失败（无写权限？），桌面入口仍指向 ${current}"
     return 1
+}
+
+# ---- 手机 App 图标兜底补全 -----------------------------------------------------
+# 手机 App 应用列表从 ${TRIM_APPDEST}/ui/images/ 读取图标（ui/config 的
+# "icon": "images/{0}.png" 指向该目录）。ui/images/256.png 自 0.1.3 起才随包生成，
+# 但 fnOS 升级流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 images 缺失，手机 App
+# 不显示图标）。此处从包内 ICON_256.PNG 复制兜底：
+#   - 已存在则跳过（幂等；全新安装的 fpk 自带该文件）
+#   - 复制失败仅告警，不阻塞安装/启动
+#   - owner 与 ui/config 保持一致（应用用户 pvepilot:pvepilot），权限 755/644
+# 注意：仅新增 ui/images 子目录与文件，不改动 ui/config，与 sync_ui_config_port 互不影响
+ensure_ui_icon() {
+    [ -n "${TRIM_APPDEST:-}" ] || return 1
+    local ui_config="${TRIM_APPDEST}/ui/config"
+    local ui_images="${TRIM_APPDEST}/ui/images"
+    local ui_icon="${ui_images}/256.png"
+    if [ -f "${ui_icon}" ]; then
+        return 0
+    fi
+    if [ ! -f "${TRIM_APPDEST}/ICON_256.PNG" ]; then
+        install_log "警告: 未找到 ${TRIM_APPDEST}/ICON_256.PNG，跳过手机 App 图标兜底补全"
+        return 1
+    fi
+    if ! ${MKDIR} "${ui_images}" 2>/dev/null; then
+        install_log "警告: 创建 ${ui_images} 失败，跳过手机 App 图标兜底补全"
+        return 1
+    fi
+    if ! ${CP} "${TRIM_APPDEST}/ICON_256.PNG" "${ui_icon}" 2>/dev/null; then
+        install_log "警告: 复制 ICON_256.PNG -> ${ui_icon} 失败，手机 App 可能不显示图标"
+        return 1
+    fi
+    chmod 755 "${ui_images}" 2>/dev/null || true
+    chmod 644 "${ui_icon}" 2>/dev/null || true
+    # owner 与 ui/config 保持一致（应用用户）；stat 不可用时跳过 chown（不阻塞）
+    if [ -r "${ui_config}" ]; then
+        local ui_owner
+        ui_owner=$(stat -c '%U:%G' "${ui_config}" 2>/dev/null) \
+            || ui_owner=$(stat -c '%u:%g' "${ui_config}" 2>/dev/null) || ui_owner=""
+        if [ -n "${ui_owner}" ]; then
+            chown "${ui_owner}" "${ui_images}" "${ui_icon}" 2>/dev/null || true
+        fi
+    fi
+    install_log "已补全手机 App 图标: ${ui_icon}"
+    return 0
 }
 
 # ---- 配置生成 ------------------------------------------------------------------
@@ -354,6 +402,8 @@ service_prestart() {
     # 启动钩子：同步实际透传端口到 ui/config（覆盖旧版本安装留下的静态 8006）
     load_saved_settings
     sync_ui_config_port "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
+    # 启动钩子：手机 App 图标缺失时兜底补全（旧版升级未携带 ui/images）
+    ensure_ui_icon || true
 }
 
 # 停止后钩子：兜底清理本应用数据目录下的 nginx 进程（避免误杀系统 nginx）
@@ -373,6 +423,8 @@ service_preuninst() {
 # 升级回调：配置/数据目录保留，确认运行时目录存在；配置缺失时兜底重建
 service_postupgrade() {
     ${MKDIR} "${PVE_LOG_DIR}" "${PVE_TMP_DIR}" 2>/dev/null || true
+    # 升级回调：手机 App 图标兜底补全（fnOS 升级不补齐新增的 ui/images 目录）
+    ensure_ui_icon || true
     if [ ! -f "${PVE_CONF}" ]; then
         install_log "升级后未发现配置，使用保存的设置兜底生成"
         load_saved_settings
