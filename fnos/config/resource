@@ -1,0 +1,19 @@
+{
+    "port-config": {
+        "protocol-file": "pvepilot.sc"
+    },
+    "data-share": {
+        "shares": [
+            {
+                "name": "pvepilot",
+                "permission": {
+                    "rw": [
+                        "pvepilot"
+                    ]
+                }
+            }
+        ]
+    },
+    "systemd-unit": {
+    }
+}

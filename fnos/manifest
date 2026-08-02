@@ -1,0 +1,15 @@
+appname         = pvepilot
+version         = 0.1.0
+display_name    = PVE 管家
+platform        = x86
+maintainer      = pve-pilot
+maintainer_url  = https://github.com/pve-pilot/pve-pilot
+distributor     = pve-pilot
+distributor_url = https://github.com/pve-pilot/pve-pilot
+desktop_uidir   = ui
+desktop_applaunchname = pvepilot.Application
+service_port    = 8800
+checkport       = false
+desc            = 通过 FN Connect 远程管理 Proxmox VE
+source          = thirdparty
+checksum        =

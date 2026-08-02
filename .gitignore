@@ -1,0 +1,15 @@
+# 构建产物 / 缓存（不入库）
+build/cache/
+build/work-*/
+build/tmp/
+build/dist/
+
+# nginx 二进制为构建产物（由 build/build-nginx.sh 生成）
+fnos/bin/nginx
+
+# 运行时数据目录：nginx.conf / logs / tmp 在安装时动态生成，不入库也不入 fpk
+fnos/var/
+
+# 系统/编辑器杂项
+*.log
+.DS_Store

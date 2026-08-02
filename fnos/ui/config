@@ -1,0 +1,15 @@
+{
+    ".url": {
+        "pvepilot.Application":
+        {
+            "title": "PVE 管家",
+            "desc": "PVE 管家 - Proxmox VE 远程管理",
+            "icon": "images/{0}.png",
+            "type": "url",
+            "port": "8800",
+            "protocol": "http",
+            "url": "/",
+            "allUsers": true
+        }
+    }
+}

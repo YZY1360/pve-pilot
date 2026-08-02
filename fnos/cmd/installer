@@ -1,0 +1,17 @@
+#!/bin/bash
+# PVE 管家：生命周期回调入口加载器
+# 加载 common（框架）与 service-setup（应用逻辑），并恢复上次保存的向导变量
+
+COMMON="$(dirname "$0")/common"
+if [ -r "${COMMON}" ]; then
+    . "${COMMON}"
+fi
+
+SVC_SETUP="$(dirname "$0")/service-setup"
+if [ -r "${SVC_SETUP}" ]; then
+    . "${SVC_SETUP}"
+fi
+
+# 恢复持久化的向导变量（升级/异常恢复场景）
+load_variables_from_file "${INST_VARIABLES}"
+call_func "initialize_variables" 2>/dev/null || true

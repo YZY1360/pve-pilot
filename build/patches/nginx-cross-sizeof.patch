@@ -1,0 +1,35 @@
+--- a/auto/types/sizeof
++++ b/auto/types/sizeof
+@@ -40,8 +40,30 @@
+ 
+ 
+ if [ -x $NGX_AUTOTEST ]; then
+-    ngx_size=`$NGX_AUTOTEST`
+-    echo " $ngx_size bytes"
++    # 交叉编译（--crossbuild）：目标二进制无法在编译机运行，
++    # 改用编译器预定义宏 __SIZEOF_* 推导类型大小（Linux LP64 ABI）。
++    if [ -n "$PVE_NGINX_CROSS" ]; then
++        case "$ngx_type" in
++            int)          macro="__SIZEOF_INT__" ;;
++            long)         macro="__SIZEOF_LONG__" ;;
++            "long long")  macro="__SIZEOF_LONG_LONG__" ;;
++            "void *")     macro="__SIZEOF_POINTER__" ;;
++            size_t)       macro="__SIZEOF_SIZE_T__" ;;
++            off_t|time_t) macro="__SIZEOF_LONG_LONG__" ;;
++            *)            macro="" ;;
++        esac
++        if [ -n "$macro" ]; then
++            ngx_size=`$CC -dM -E -x c /dev/null 2>/dev/null \
++                      | awk -v m="$macro" '$2 == m { print $3 }'`
++        else
++            # 其余 POSIX 类型（sig_atomic_t/socklen_t/rlim_t 等）LP64 下均为 4 字节
++            ngx_size=4
++        fi
++        echo " $ngx_size bytes (cross)"
++    else
++        ngx_size=`$NGX_AUTOTEST`
++        echo " $ngx_size bytes"
++    fi
+ fi
+ 
+ 

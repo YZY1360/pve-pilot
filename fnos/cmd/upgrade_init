@@ -1,0 +1,4 @@
+#!/bin/bash
+# PVE 管家：升级前置回调（停止服务并保留数据）
+. "$(dirname "$0")/installer"
+"$(basename "$0")" > "${TRIM_TEMP_LOGFILE}"

@@ -1,0 +1,4 @@
+#!/bin/bash
+# PVE 管家：配置修改回调（重写配置并重启服务）
+. "$(dirname "$0")/installer"
+"$(basename "$0")" > "${TRIM_TEMP_LOGFILE}"
