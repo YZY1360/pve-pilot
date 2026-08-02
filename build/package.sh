@@ -148,7 +148,7 @@ chmod +x "${APP_ROOT}/bin/nginx"
 
 APP_TGZ="${TMP}/app.tgz"
 # 与 conversun build-fpk.sh 一致：不带 "./" 前缀打包，便于 fnOS 解析
-tar -czf "${APP_TGZ}" -C "${APP_ROOT}" *
+(cd "${APP_ROOT}" && tar -czf "${APP_TGZ}" *)
 CHECKSUM="$(md5sum "${APP_TGZ}" | cut -d' ' -f1)"
 echo "[INFO] app.tgz: $(du -h "${APP_TGZ}" | cut -f1)，checksum=${CHECKSUM}"
 
@@ -184,5 +184,5 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 mkdir -p "${OUT_DIR}"
-tar -czf "${OUT_DIR}/${FPK_NAME}" -C "${PKG_ROOT}" *
+(cd "${PKG_ROOT}" && tar -czf "${OUT_DIR}/${FPK_NAME}" *)
 echo "[INFO] 生成: ${OUT_DIR}/${FPK_NAME} ($(du -h "${OUT_DIR}/${FPK_NAME}" | cut -f1))"
