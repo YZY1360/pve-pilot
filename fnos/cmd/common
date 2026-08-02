@@ -32,7 +32,7 @@ if [ -z "${TRIM_PKGVAR:-}" ]; then
     exit 1
 fi
 case "${TRIM_PKGVAR}" in
-    /vol[0-9]*/@appdata/*) ;;              # 常规安装：fnOS 数据盘 /vol1、/vol2… 的 @appdata/<appname>
+    /vol*) ;;                               # 普通应用：fnOS 数据盘挂载点 /vol1、/vol2…（子目录名由框架保证，不做假设）
     /usr/local/apps/@appdata/*) ;;          # root 安装：系统盘应用数据目录
     *)
         # 本地开发/验证模式：显式设置 PVE_PILOT_DEV=1 时放行任意路径
