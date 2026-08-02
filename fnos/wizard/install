@@ -4,11 +4,11 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "PVE 管家内置 nginx 反代引擎，将本机端口全量透传到你的 Proxmox VE WebUI。<br><br>安装完成后即可通过 <code>http://你的飞牛地址:8800</code>（或 FN Connect 链接）访问原版 PVE WebUI。"
+                "helpText": "PVE 管家内置 nginx 反代引擎，将本机端口全量透传到你的 Proxmox VE WebUI。<br><br>安装完成后即可通过 <code>http://你的飞牛地址:8006</code>（或 FN Connect 链接）访问原版 PVE WebUI。"
             },
             {
                 "type": "tips",
-                "helpText": "认证完全由 PVE 自身负责（密码 / 2FA），本应用不保存任何 PVE 凭据。<br><br>透传端口建议保持默认 8800，与 FN Connect 端口转发声明（.sc）一致。"
+                "helpText": "认证完全由 PVE 自身负责（密码 / 2FA），本应用不保存任何 PVE 凭据。<br><br>透传端口默认 8006，可修改。"
             },
             {
                 "type": "tips",
@@ -45,8 +45,8 @@
                 "type": "text",
                 "field": "wizard_proxy_port",
                 "label": "透传端口",
-                "initValue": "8800",
-                "placeholder": "飞牛本机监听端口，建议保持 8800",
+                "initValue": "8006",
+                "placeholder": "飞牛本机监听端口，默认 8006",
                 "rules": [
                     { "required": true, "message": "请输入透传端口" },
                     { "pattern": "^(102[4-9]|10[3-9][0-9]|1[1-9][0-9]{2}|[2-9][0-9]{3}|[1-5][0-9]{4}|6[0-5][0-9]{3})$", "message": "透传端口必须在 1024-65535 之间" }

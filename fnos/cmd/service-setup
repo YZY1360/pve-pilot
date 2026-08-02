@@ -20,7 +20,7 @@
 # ---- 默认值（与 wizard 表单 initValue 保持一致）-----------------------------
 PVE_ADDR_DEFAULT="192.168.8.10"
 PVE_PORT_DEFAULT="8006"
-PROXY_PORT_DEFAULT="8800"
+PROXY_PORT_DEFAULT="8006"
 
 # ---- 运行时路径 --------------------------------------------------------------
 NGINX_BIN="${TRIM_APPDEST}/bin/nginx"

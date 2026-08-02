@@ -23,10 +23,8 @@ Access your Proxmox VE WebUI through the FN Connect tunnel — **no public IP re
 ## Usage
 
 1. Install the app from the fnOS app center
-2. In the setup wizard, enter: **PVE address** (IP or hostname), **PVE port** (default 8006), **proxy port** (default 8800)
-3. Open the app — or browse to `http://<your-nas>:8800` / your FN Connect link — and you'll see the original PVE WebUI
-
-> Tip: keep the proxy port at the default 8800 (it matches the FN Connect forwarding declaration). If you change it, make sure the new port is free first.
+2. In the setup wizard, enter: **PVE address** (IP or hostname), **PVE port** (default 8006), **proxy port** (default 8006, changeable)
+3. Open the app — or browse to `http://<your-nas>:8006` / your FN Connect link — and you'll see the original PVE WebUI
 
 ## License
 

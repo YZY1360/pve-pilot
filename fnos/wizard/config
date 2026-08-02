@@ -37,8 +37,8 @@
                 "type": "text",
                 "field": "wizard_proxy_port",
                 "label": "透传端口",
-                "initValue": "8800",
-                "placeholder": "飞牛本机监听端口，建议保持 8800",
+                "initValue": "8006",
+                "placeholder": "飞牛本机监听端口，默认 8006",
                 "rules": [
                     { "required": true, "message": "请输入透传端口" },
                     { "pattern": "^(102[4-9]|10[3-9][0-9]|1[1-9][0-9]{2}|[2-9][0-9]{3}|[1-5][0-9]{4}|6[0-5][0-9]{3})$", "message": "透传端口必须在 1024-65535 之间" }

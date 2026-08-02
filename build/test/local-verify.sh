@@ -32,9 +32,9 @@ echo "======================================================"
 echo " PVE 管家 本地验证  work=${WORK}"
 echo "======================================================"
 
-# ---- 1. 自签 HTTPS 后端（模拟 PVE 8006）-------------------------------------
+# ---- 1. 自签 HTTPS 后端（模拟 PVE；监听 8007 避免与透传默认端口 8006 冲突）----
 echo
-echo "[1/7] 准备自签 HTTPS 后端（模拟 PVE 8006）"
+echo "[1/7] 准备自签 HTTPS 后端（模拟 PVE）"
 openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "${WORK}/pve.key" -out "${WORK}/pve.crt" \
     -days 1 -subj "/CN=pve.local" >/dev/null 2>&1
@@ -69,7 +69,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(sys.argv[1], sys.argv[2])
-server = http.server.HTTPServer(("127.0.0.1", 8006), Handler)
+server = http.server.HTTPServer(("127.0.0.1", 8007), Handler)
 server.socket = ctx.wrap_socket(server.socket, server_side=True)
 server.serve_forever()
 PYEOF
@@ -78,7 +78,7 @@ python3 "${WORK}/backend.py" "${WORK}/pve.crt" "${WORK}/pve.key" \
     >"${WORK}/backend.log" 2>&1 &
 BACKEND_PID=$!
 sleep 1
-echo "    后端已启动 pid=${BACKEND_PID}（https://127.0.0.1:8006，自签证书）"
+echo "    后端已启动 pid=${BACKEND_PID}（https://127.0.0.1:8007，自签证书）"
 
 # ---- 2. 模拟 fnOS 安装回调 ---------------------------------------------------
 echo
@@ -89,8 +89,8 @@ export TRIM_PKGVAR="${WORK}/var"
 export TRIM_APPNAME="pvepilot"
 export TRIM_TEMP_LOGFILE="${WORK}/install.tmp.log"
 export wizard_pve_addr="127.0.0.1"
-export wizard_pve_port="8006"
-export wizard_proxy_port="8800"
+export wizard_pve_port="8007"
+export wizard_proxy_port="8006"
 mkdir -p "${TRIM_PKGVAR}"
 
 "${ROOT}/fnos/cmd/install_callback" >/dev/null 2>&1
@@ -104,9 +104,9 @@ echo
 echo "[3/7] §5 透传配置要点逐项核对"
 CONF="${TRIM_PKGVAR}/nginx.conf"
 checks=(
-    "listen       8800;|透传端口 8800"
+    "listen       8006;|透传端口 8006"
     "server_name  _;|server_name _"
-    "proxy_pass        https://127.0.0.1:8006;|proxy_pass https://地址:端口"
+    "proxy_pass        https://127.0.0.1:8007;|proxy_pass https://地址:端口"
     "proxy_set_header  Host \$host;|Host 头必须透传"
     "proxy_http_version 1.1;|HTTP/1.1"
     "proxy_set_header  Upgrade \$http_upgrade;|websocket Upgrade"
@@ -143,9 +143,9 @@ echo "[5/7] main start + 端到端透传"
 NGINX_PID=$(cat "${TRIM_PKGVAR}/pvepilot.pid")
 "${ROOT}/fnos/cmd/main" status
 
-echo "    curl http://127.0.0.1:8800/"
+echo "    curl http://127.0.0.1:8006/"
 RESP=$(curl -sk --max-time 10 -H "Host: test.fnos.net" \
-    http://127.0.0.1:8800/pve/test 2>/dev/null || true)
+    http://127.0.0.1:8006/pve/test 2>/dev/null || true)
 echo "${RESP}" | python3 -m json.tool 2>/dev/null | sed 's/^/    /' || echo "    RESP: ${RESP}"
 echo "${RESP}" | grep -q '"Host": "test.fnos.net"' \
     || { echo "FAIL: Host 头未透传"; exit 1; }
@@ -157,7 +157,7 @@ echo "    [OK] Host 头与路径透传正确（后端收到的 Host=客户端原
 echo
 echo "[6/7] config_callback（改监听端口 8801 并重启）"
 export wizard_pve_addr="127.0.0.1"
-export wizard_pve_port="8006"
+export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
 "${ROOT}/fnos/cmd/config_callback" >/dev/null 2>&1
 echo "    config_callback 退出码=$?"
@@ -168,10 +168,10 @@ if curl -sk --max-time 5 -o /dev/null http://127.0.0.1:8801/; then
 else
     echo "FAIL: 8801 未监听"; exit 1
 fi
-if curl -sk --max-time 3 -o /dev/null http://127.0.0.1:8800/ 2>/dev/null; then
-    echo "FAIL: 旧端口 8800 仍监听"; exit 1
+if curl -sk --max-time 3 -o /dev/null http://127.0.0.1:8006/ 2>/dev/null; then
+    echo "FAIL: 旧端口 8006 仍监听"; exit 1
 else
-    echo "    [OK] 旧端口 8800 已释放"
+    echo "    [OK] 旧端口 8006 已释放"
 fi
 
 # ---- 7. main stop/restart/log ---------------------------------------------------
@@ -190,7 +190,7 @@ fi
 echo
 echo "[8/8] 生命周期回调冒烟 + 配置缺失兜底重建"
 export wizard_pve_addr="127.0.0.1"
-export wizard_pve_port="8006"
+export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
 for cb in install_init config_init upgrade_init upgrade_callback uninstall_init; do
     if "${ROOT}/fnos/cmd/${cb}" >/dev/null 2>&1; then
