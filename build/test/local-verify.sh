@@ -7,8 +7,8 @@
 #   2. §5 配置要点逐项核对
 #   3. nginx -t 配置语法校验
 #   4. 真实启动 nginx 并经由本地自签 HTTPS 后端做端到端透传
-#      （验证 Host 头透传、https→https 自签后端、websocket 头）
-#   5. config_callback 重写配置并重启（改监听端口）
+#      （验证 Host 头透传、https→https 自签后端、websocket 头、HTTP 301→HTTPS）
+#   5. config_callback 重写配置并重启（改监听端口，ui/config 端口声明联动）
 #   6. main stop/status/restart
 #
 # 用法：./build/test/local-verify.sh
@@ -27,6 +27,11 @@ cleanup() {
     rm -rf "${WORK}"
 }
 trap cleanup EXIT
+
+# 端口声明同步会把实际透传端口写回 ${TRIM_APPDEST}/ui/config；为避免污染仓库源码，
+# 用临时副本作为应用安装目录（仍包含 bin/nginx 与 conf/mime.types）
+APP_DEST="${WORK}/appdest"
+cp -a "${ROOT}/fnos" "${APP_DEST}"
 
 echo "======================================================"
 echo " PVE 管家 本地验证  work=${WORK}"
@@ -84,7 +89,7 @@ echo "    后端已启动 pid=${BACKEND_PID}（https://127.0.0.1:8007，自签�
 echo
 echo "[2/7] 模拟 install_callback（TRIM_* 环境变量 + 向导输入）"
 export PVE_PILOT_DEV=1
-export TRIM_APPDEST="${ROOT}/fnos"
+export TRIM_APPDEST="${APP_DEST}"
 export TRIM_PKGVAR="${WORK}/var"
 export TRIM_APPNAME="pvepilot"
 export TRIM_TEMP_LOGFILE="${WORK}/install.tmp.log"
@@ -104,12 +109,14 @@ echo
 echo "[3/7] §5 透传配置要点逐项核对"
 CONF="${TRIM_PKGVAR}/nginx.conf"
 checks=(
-    "listen       8006;|透传端口 8006"
+    "listen       8006 ssl;|透传端口 8006（HTTPS 单监听）"
+    "ssl_certificate     ${TRIM_PKGVAR}/server.crt;|ssl_certificate 指向 TRIM_PKGVAR"
+    "error_page   497 =301 https://\$host:8006\$request_uri;|HTTP 访问 301 到 HTTPS（同端口）"
     "server_name  _;|server_name _"
     "proxy_pass        https://127.0.0.1:8007;|proxy_pass https://地址:端口"
     "proxy_set_header  Host \$host;|Host 头必须透传"
     "proxy_set_header  X-Forwarded-Proto \$scheme;|X-Forwarded-Proto 透传原始协议"
-    "proxy_cookie_flags ~ nosecure;|剥离 Secure cookie 标志"
+    "proxy_cookie_flags ~ nosecure;|剥离后端 Set-Cookie 的 Secure 标志（双保险）"
     "proxy_http_version 1.1;|HTTP/1.1"
     "proxy_set_header  Upgrade \$http_upgrade;|websocket Upgrade"
     "proxy_set_header  Connection \"upgrade\";|websocket Connection"
@@ -145,9 +152,18 @@ echo "[5/7] main start + 端到端透传"
 NGINX_PID=$(cat "${TRIM_PKGVAR}/pvepilot.pid")
 "${ROOT}/fnos/cmd/main" status
 
-echo "    curl http://127.0.0.1:8006/"
+echo "    curl http://127.0.0.1:8006/ → 应 301 到 https"
+HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -H "Host: test.fnos.net" http://127.0.0.1:8006/pve/test 2>/dev/null || true)
+[ "${HTTP_CODE}" = "301" ] || { echo "FAIL: HTTP 未 301 到 HTTPS（code=${HTTP_CODE}）"; exit 1; }
+LOC=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 10 \
+    -H "Host: test.fnos.net" http://127.0.0.1:8006/pve/test 2>/dev/null || true)
+[ "${LOC}" = "https://test.fnos.net:8006/pve/test" ] \
+    || { echo "FAIL: 301 Location 错误（${LOC}）"; exit 1; }
+echo "    [OK] HTTP 访问 301 到 HTTPS（Location: ${LOC}）"
+echo "    curl -k https://127.0.0.1:8006/"
 RESP=$(curl -sk --max-time 10 -H "Host: test.fnos.net" \
-    http://127.0.0.1:8006/pve/test 2>/dev/null || true)
+    https://127.0.0.1:8006/pve/test 2>/dev/null || true)
 echo "${RESP}" | python3 -m json.tool 2>/dev/null | sed 's/^/    /' || echo "    RESP: ${RESP}"
 echo "${RESP}" | grep -q '"Host": "test.fnos.net"' \
     || { echo "FAIL: Host 头未透传"; exit 1; }
@@ -163,7 +179,7 @@ export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
 "${ROOT}/fnos/cmd/config_callback" >/dev/null 2>&1
 echo "    config_callback 退出码=$?"
-grep -q "listen       8801;" "${CONF}" || { echo "FAIL: 配置未重写"; exit 1; }
+grep -q "listen       8801 ssl;" "${CONF}" || { echo "FAIL: 配置未重写"; exit 1; }
 sleep 1
 if curl -sk --max-time 5 -o /dev/null http://127.0.0.1:8801/; then
     echo "    [OK] 新端口 8801 已监听（服务重启成功）"
@@ -207,7 +223,7 @@ done
 rm -f "${TRIM_PKGVAR}/nginx.conf"
 "${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
 sleep 1
-grep -q "listen       8801;" "${TRIM_PKGVAR}/nginx.conf" \
+grep -q "listen       8801 ssl;" "${TRIM_PKGVAR}/nginx.conf" \
     && echo "    [OK]   配置缺失时自动按保存的设置重建（8801）" \
     || { echo "FAIL: 配置缺失未自动重建"; exit 1; }
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
