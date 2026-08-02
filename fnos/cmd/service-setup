@@ -29,7 +29,10 @@
 #   6. 手机 App 应用列表图标（ui/images/256.png）由生命周期钩子兜底补全：fnOS 升级
 #      流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 ui/images 缺失，手机 App 无图标；
 #      Web 端用框架注册图标 ICON.PNG，升级会更新故不受影响）。升级回调与启动钩子中
-#      从包内 ICON_256.PNG 复制补齐（幂等，失败仅告警不阻塞）。
+#      从图标源多候选复制补齐（幂等，失败仅告警不阻塞）：优先安装目录根部的
+#      ICON_256.PNG；其次框架注册目录 /var/apps/${TRIM_APPNAME}/ICON_256.PNG（实测
+#      升级时 fpk 根目录图标只被提取到该目录，应用安装目录下反而没有）；最后退回
+#      安装目录根部的 ICON.PNG。
 # ============================================================================
 
 # ---- 默认值（与 wizard 表单 initValue 保持一致；PVE 地址无默认值，必须由向导传入）---
@@ -189,7 +192,10 @@ sync_ui_config_port() {
 # 手机 App 应用列表从 ${TRIM_APPDEST}/ui/images/ 读取图标（ui/config 的
 # "icon": "images/{0}.png" 指向该目录）。ui/images/256.png 自 0.1.3 起才随包生成，
 # 但 fnOS 升级流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 images 缺失，手机 App
-# 不显示图标）。此处从包内 ICON_256.PNG 复制兜底：
+# 不显示图标）。此处从图标源多候选复制兜底：
+#   - 优先 ${TRIM_APPDEST}/ICON_256.PNG；其次 /var/apps/${TRIM_APPNAME}/ICON_256.PNG
+#     （实测：fnOS 安装/升级把 fpk 根目录的 ICON.PNG / ICON_256.PNG 提取到框架注册
+#     目录，应用安装目录下反而不存在）；最后 ${TRIM_APPDEST}/ICON.PNG
 #   - 已存在则跳过（幂等；全新安装的 fpk 自带该文件）
 #   - 复制失败仅告警，不阻塞安装/启动
 #   - owner 与 ui/config 保持一致（应用用户 pvepilot:pvepilot），权限 755/644
@@ -202,16 +208,25 @@ ensure_ui_icon() {
     if [ -f "${ui_icon}" ]; then
         return 0
     fi
-    if [ ! -f "${TRIM_APPDEST}/ICON_256.PNG" ]; then
-        install_log "警告: 未找到 ${TRIM_APPDEST}/ICON_256.PNG，跳过手机 App 图标兜底补全"
+    # 源图标多候选：应用安装目录根部、框架注册目录 /var/apps/${TRIM_APPNAME}/、再退回 ICON.PNG
+    local icon_src=""
+    if [ -f "${TRIM_APPDEST}/ICON_256.PNG" ]; then
+        icon_src="${TRIM_APPDEST}/ICON_256.PNG"
+    elif [ -n "${TRIM_APPNAME:-}" ] && [ -f "/var/apps/${TRIM_APPNAME}/ICON_256.PNG" ]; then
+        icon_src="/var/apps/${TRIM_APPNAME}/ICON_256.PNG"
+    elif [ -f "${TRIM_APPDEST}/ICON.PNG" ]; then
+        icon_src="${TRIM_APPDEST}/ICON.PNG"
+    fi
+    if [ -z "${icon_src}" ]; then
+        install_log "警告: 未找到 ${TRIM_APPDEST}/ICON_256.PNG、/var/apps/${TRIM_APPNAME:-}/ICON_256.PNG、${TRIM_APPDEST}/ICON.PNG，跳过手机 App 图标兜底补全"
         return 1
     fi
     if ! ${MKDIR} "${ui_images}" 2>/dev/null; then
         install_log "警告: 创建 ${ui_images} 失败，跳过手机 App 图标兜底补全"
         return 1
     fi
-    if ! ${CP} "${TRIM_APPDEST}/ICON_256.PNG" "${ui_icon}" 2>/dev/null; then
-        install_log "警告: 复制 ICON_256.PNG -> ${ui_icon} 失败，手机 App 可能不显示图标"
+    if ! ${CP} "${icon_src}" "${ui_icon}" 2>/dev/null; then
+        install_log "警告: 复制 ${icon_src} -> ${ui_icon} 失败，手机 App 可能不显示图标"
         return 1
     fi
     chmod 755 "${ui_images}" 2>/dev/null || true

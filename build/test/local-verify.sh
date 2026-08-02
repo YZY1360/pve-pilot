@@ -20,10 +20,14 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d /tmp/pvepilot-verify.XXXXXX)"
 BACKEND_PID=""
 NGINX_PID=""
+FRAMEWORK_ICON_CREATED=""
 
 cleanup() {
     [ -n "${BACKEND_PID}" ] && kill "${BACKEND_PID}" 2>/dev/null || true
     [ -n "${NGINX_PID}" ] && kill "${NGINX_PID}" 2>/dev/null || true
+    # 仅清理本次测试自己创建的框架注册目录图标，避免误删真机已有文件
+    [ -n "${FRAMEWORK_ICON_CREATED}" ] && rm -f "/var/apps/${TRIM_APPNAME:-}/ICON_256.PNG" 2>/dev/null || true
+    [ -n "${FRAMEWORK_ICON_CREATED}" ] && rmdir "/var/apps/${TRIM_APPNAME:-}" 2>/dev/null || true
     rm -rf "${WORK}"
 }
 trap cleanup EXIT
@@ -233,6 +237,39 @@ cmp -s "${ICON}" "${APP_DEST}/ICON_256.PNG" \
 [ "$(stat -c %u:%g "${ICON}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
     || { echo "FAIL: 256.png owner 与 ui/config 不一致"; exit 1; }
 echo "    [OK]   service_postupgrade 兜底生成 ui/images/256.png（644/755，owner 与 ui/config 一致）"
+
+# 模拟 0.1.4 实机场景（飞牛安装日志）：fpk 根目录的 ICON_256.PNG 被提取到框架注册
+# 目录 /var/apps/${TRIM_APPNAME}/，应用安装目录下反而没有；service_postupgrade
+# 应从 /var/apps 源兜底生成 256.png
+FRAMEWORK_DIR="/var/apps/${TRIM_APPNAME}"
+if [ -f "${FRAMEWORK_DIR}/ICON_256.PNG" ]; then
+    # 真机/已有安装场景：文件已存在则直接作为源与比对基准，不做任何删除
+    FRAMEWORK_ICON="${FRAMEWORK_DIR}/ICON_256.PNG"
+else
+    mkdir -p "${FRAMEWORK_DIR}"
+    cp -f "${APP_DEST}/ICON_256.PNG" "${FRAMEWORK_DIR}/ICON_256.PNG"
+    FRAMEWORK_ICON="${FRAMEWORK_DIR}/ICON_256.PNG"
+    FRAMEWORK_ICON_CREATED=1
+fi
+FRAMEWORK_REF="${WORK}/icon256.framework.ref"
+cp -f "${FRAMEWORK_ICON}" "${FRAMEWORK_REF}"
+rm -f "${APP_DEST}/ICON_256.PNG" "${APP_DEST}/ICON.PNG"
+rm -rf "${APP_DEST}/ui/images"
+"${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
+[ -f "${ICON}" ] || { echo "FAIL: /var/apps 源场景下未补齐 ui/images/256.png"; exit 1; }
+cmp -s "${ICON}" "${FRAMEWORK_REF}" \
+    || { echo "FAIL: 256.png 与 /var/apps 源 ICON_256.PNG 内容不一致"; exit 1; }
+[ "$(stat -c %a "${ICON}")" = "644" ] || { echo "FAIL: /var/apps 场景 256.png 权限非 644"; exit 1; }
+[ "$(stat -c %u:%g "${ICON}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
+    || { echo "FAIL: /var/apps 场景 256.png owner 与 ui/config 不一致"; exit 1; }
+echo "    [OK]   service_postupgrade 从 ${FRAMEWORK_ICON} 兜底生成 256.png（644，owner 与 ui/config 一致）"
+# 恢复安装目录图标副本供后续 prestart/幂等用例使用；框架目录仅在我们创建时清理
+cp -f "${FRAMEWORK_REF}" "${APP_DEST}/ICON_256.PNG"
+if [ -n "${FRAMEWORK_ICON_CREATED}" ]; then
+    rm -f "${FRAMEWORK_ICON}"
+    rmdir "${FRAMEWORK_DIR}" 2>/dev/null || true
+    FRAMEWORK_ICON_CREATED=""
+fi
 
 # service_prestart 兜底：再次删除后 main start 也应补齐，且已存在时不覆盖（幂等）
 rm -rf "${APP_DEST}/ui/images"
