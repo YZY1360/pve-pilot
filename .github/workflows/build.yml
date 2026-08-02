@@ -1,0 +1,77 @@
+name: Build fpk packages
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  NGINX_VERSION: 1.28.3
+  OPENSSL_VERSION: 3.6.3
+  PCRE2_VERSION: 10.46
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            nginx_bin: build/out/nginx-x86_64
+          - arch: arm
+            nginx_bin: build/out/nginx-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl tar patch file
+          if [ "${{ matrix.arch }}" = "arm" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          fi
+
+      - name: Cache source downloads
+        uses: actions/cache@v4
+        with:
+          path: build/cache
+          key: nginx-${{ env.NGINX_VERSION }}-openssl-${{ env.OPENSSL_VERSION }}-pcre2-${{ env.PCRE2_VERSION }}
+
+      - name: Build static nginx (${{ matrix.arch }})
+        run: ./build/build-nginx.sh --arch ${{ matrix.arch }}
+
+      # 用新编译的 x86 二进制对安装模板生成的 nginx.conf 做语法校验
+      # （Secure cookie 修复的 proxy_cookie_flags ~ 依赖 PCRE2，须由新二进制解析）；
+      # arm 二进制无法在 x86 runner 上执行，语法校验只在 x86 job 做一次即可
+      - name: Validate generated nginx config (${{ matrix.arch }})
+        if: matrix.arch == 'x86'
+        run: |
+          export PVE_PILOT_DEV=1
+          export TRIM_APPDEST="$PWD/fnos"
+          export TRIM_PKGVAR="$PWD/build/tmp/ci-nginx-var"
+          export TRIM_APPNAME=pvepilot
+          export TRIM_TEMP_LOGFILE="$PWD/build/tmp/ci-install.log"
+          export wizard_pve_addr=127.0.0.1
+          export wizard_pve_port=8007
+          export wizard_proxy_port=8006
+          mkdir -p "$TRIM_PKGVAR"
+          ./fnos/cmd/install_callback
+          ${{ matrix.nginx_bin }} -t -c "$TRIM_PKGVAR/nginx.conf" -p "$TRIM_PKGVAR/"
+
+      - name: Package .fpk (${{ matrix.arch }})
+        run: ./build/package.sh --arch ${{ matrix.arch }} --nginx ${{ matrix.nginx_bin }}
+
+      - name: Upload fpk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvepilot-fpk-${{ matrix.arch }}
+          path: build/dist/*.fpk
+          if-no-files-found: error

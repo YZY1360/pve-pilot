@@ -15,6 +15,8 @@
 #   1. 根路径全量透传（PVE 不支持子目录）
 #   2. Host 头必须透传（否则登录后白屏/重定向循环）
 #   3. proxy_ssl_verify off（PVE 8006 为自签 HTTPS，后端不校验证书）
+#   4. 透传 X-Forwarded-Proto 并剥离 Secure cookie 标志（PVE 在 HTTPS 下设置
+#      Secure cookie，本地 HTTP 访问时浏览器不存储；见 ADR：Secure cookie 修复）
 # ============================================================================
 
 # ---- 默认值（与 wizard 表单 initValue 保持一致；PVE 地址无默认值，必须由向导传入）---
@@ -140,6 +142,8 @@ http {
         location / {
             proxy_pass        https://${upstream_addr}:${pve_port};
             proxy_set_header  Host \$host;                  # 必须透传：PVE 靠 Host 头拼 URL
+            proxy_set_header  X-Forwarded-Proto \$scheme;   # 透传原始协议（\$scheme 随实际连接取 http/https）
+            proxy_cookie_flags ~ nosecure;                  # 剥离 Secure 标志：本地 HTTP 访问浏览器才存 cookie
             proxy_http_version 1.1;
             proxy_set_header  Upgrade \$http_upgrade;       # noVNC/控制台/任务日志 = websocket
             proxy_set_header  Connection "upgrade";

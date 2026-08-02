@@ -3,18 +3,19 @@
 # PVE 管家（pve-pilot）— nginx 静态二进制构建脚本
 # ----------------------------------------------------------------------------
 # 目标：
-#   - 官方源码（nginx.org）编译，静态链接 OpenSSL 等第三方库
+#   - 官方源码（nginx.org）编译，静态链接 PCRE2 / OpenSSL 等第三方库
 #   - 产物：build/out/nginx-x86_64、build/out/nginx-aarch64（strip 后）
 #   - 原生架构（本机为 x86_64）同时拷贝到 fnos/bin/nginx（仓库默认产物）
 #
 # 模块取舍（对应任务书 §7）：
-#   - 启用：http_proxy_module（默认）、http_ssl_module、stream_module(+ssl)
-#   - 关闭：rewrite（省 pcre2）、gzip（省 zlib）及其余用不到的内容模块，
-#     以控制二进制体积（目标 ~5MB）
+#   - 启用：http_proxy_module（默认）、http_ssl_module、stream_module(+ssl)、
+#     PCRE2（供 proxy_cookie_flags ~ 正则匹配，透传时剥离 PVE 的 Secure cookie）
+#   - 关闭：rewrite（保留 pcre2 但不用 rewrite 模块）、gzip（省 zlib）及其余
+#     用不到的内容模块，以控制二进制体积（目标 ~5MB）
 #
 # 用法：
 #   ./build/build-nginx.sh [--arch x86|arm|both] [--cache-dir DIR] [-v 1.28.3]
-# 环境变量：NGINX_VERSION / OPENSSL_VERSION 可覆盖版本
+# 环境变量：NGINX_VERSION / OPENSSL_VERSION / PCRE2_VERSION 可覆盖版本
 # ============================================================================
 set -euo pipefail
 
@@ -24,15 +25,18 @@ OUT_DIR="${BUILD_DIR}/out"
 
 NGINX_VERSION="${NGINX_VERSION:-1.28.3}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.6.3}"
+PCRE2_VERSION="${PCRE2_VERSION:-10.46}"
 
 NGINX_URL="https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 OPENSSL_URL="https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+PCRE2_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"
 
 # 模块裁剪：保留 proxy/ssl/stream，去掉用不到的内容模块
 CONFIGURE_MODULE_OPTS=(
     --with-http_ssl_module
     --with-stream
     --with-stream_ssl_module
+    --with-pcre
     --without-http_rewrite_module
     --without-http_gzip_module
     --without-http_ssi_module
@@ -73,6 +77,7 @@ usage() {
 环境变量:
   NGINX_VERSION          nginx 版本（默认 ${NGINX_VERSION}）
   OPENSSL_VERSION        OpenSSL 版本（默认 ${OPENSSL_VERSION}）
+  PCRE2_VERSION          PCRE2 版本（默认 ${PCRE2_VERSION}）
 EOF
 }
 
@@ -146,8 +151,10 @@ build_arch() {
 
     local nginx_src="${work}/nginx-src"
     local openssl_src="${work}/openssl-src"
+    local pcre2_src="${work}/pcre2-src"
     fetch_extract "${NGINX_URL}" "nginx-${NGINX_VERSION}" "${nginx_src}"
     fetch_extract "${OPENSSL_URL}" "openssl-${OPENSSL_VERSION}" "${openssl_src}"
+    fetch_extract "${PCRE2_URL}" "pcre2-${PCRE2_VERSION}" "${pcre2_src}"
 
     # mime.types 随源码同步到应用 conf/（仓库内静态文件，供打包使用）
     cp -f "${nginx_src}/conf/mime.types" "${ROOT}/fnos/conf/mime.types"
@@ -174,6 +181,10 @@ build_arch() {
             echo "[ERROR] endianness 交叉补丁应用失败" >&2
             exit 1
         }
+        # PCRE2 交叉构建：nginx 生成的 pcre 构建规则不传 --host，
+        # autoconf 会尝试运行 aarch64 测试程序导致 configure 失败，这里补上
+        sed -i 's#\./configure --disable-shared #./configure --host='"${cross_prefix%-}"' --disable-shared #g' \
+            auto/lib/pcre/make
     else
         export PVE_NGINX_CROSS=0
     fi
@@ -187,6 +198,7 @@ build_arch() {
         --with-cc-opt="-O2" \
         --with-ld-opt="-static" \
         --with-openssl="${openssl_src}" \
+        --with-pcre="${pcre2_src}" \
         "${openssl_opt_args[@]}" \
         "${cross_opt_args[@]}" \
         "${CONFIGURE_MODULE_OPTS[@]}"

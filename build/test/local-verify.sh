@@ -108,6 +108,8 @@ checks=(
     "server_name  _;|server_name _"
     "proxy_pass        https://127.0.0.1:8007;|proxy_pass https://地址:端口"
     "proxy_set_header  Host \$host;|Host 头必须透传"
+    "proxy_set_header  X-Forwarded-Proto \$scheme;|X-Forwarded-Proto 透传原始协议"
+    "proxy_cookie_flags ~ nosecure;|剥离 Secure cookie 标志"
     "proxy_http_version 1.1;|HTTP/1.1"
     "proxy_set_header  Upgrade \$http_upgrade;|websocket Upgrade"
     "proxy_set_header  Connection \"upgrade\";|websocket Connection"
