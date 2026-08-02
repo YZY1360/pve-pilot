@@ -14,6 +14,12 @@ Access your Proxmox VE WebUI through the FN Connect tunnel — **no public IP re
 - **Lightweight built-in engine**: static nginx reverse proxy (~5–8MB), zero external dependencies
 - **Secure & transparent**: login, permissions and 2FA all stay with PVE itself; the app never touches your credentials
 
+## Roadmap
+
+- **V1 (MVP, in progress)**: access the original PVE WebUI from PC (full passthrough)
+- **V2 (planned)**: mobile-first UI — node status / VM list / power controls, noVNC console
+- **V3 (future)**: snapshots & backups, multi-node clusters, notifications
+
 ## Usage
 
 1. Install the app from the fnOS app center
