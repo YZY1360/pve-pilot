@@ -40,7 +40,8 @@ jobs:
             build-essential curl tar patch file
           if [ "${{ matrix.arch }}" = "arm" ]; then
             sudo apt-get install -y --no-install-recommends \
-              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+              libc6-dev-arm64-cross
           fi
 
       - name: Cache source downloads
