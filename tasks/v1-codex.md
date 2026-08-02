@@ -92,7 +92,7 @@ server {
 
 ```
 appname = pvepilot
-version = 0.1.1
+version = 0.1.2
 display_name = PVE 管家
 service_port = 8800
 checkport = false
