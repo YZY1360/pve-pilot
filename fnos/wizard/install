@@ -13,6 +13,10 @@
             {
                 "type": "tips",
                 "helpText": "PVE WebUI 固定使用根路径，无法放在子目录；本应用通过独立端口实现全量透传，不影响飞牛自身 WebUI。"
+            },
+            {
+                "type": "tips",
+                "helpText": "安全提示：当前方案通过 HTTP 明文透传（内网传输不加密），PVE 登录密码与登录凭证会在局域网内以明文传输。<br><br>是否采纳以下建议由你自行决定：<br>· 仅在内网可信任网络使用，公共 / 共享 WiFi 请谨慎<br>· 远程访问建议走 FN Connect（HTTPS 加密）或 VPN<br>· 建议在 PVE 侧开启双因子认证（2FA / TOTP）"
             }
         ]
     },
