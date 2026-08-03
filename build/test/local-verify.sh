@@ -10,6 +10,8 @@
 #      （验证 Host 头透传、https→https 自签后端、websocket 头、HTTP 301→HTTPS）
 #   5. config_callback 重写配置并重启（改监听端口，ui/config 端口声明联动）
 #   6. main stop/status/restart
+#   7. 手机 App 图标兜底补全：ui/images 多尺寸（16/24/32/48/64/72/96/128/256）
+#      + 各尺寸幂等
 #
 # 用法：./build/test/local-verify.sh
 # 环境：需可执行 fnos/bin/nginx（x86_64 或 aarch64 本机二进制）
@@ -223,24 +225,39 @@ for cb in install_init config_init upgrade_init upgrade_callback uninstall_init;
     fi
 done
 
+# 手机 App 按 ui/config 的 "icon": "images/{0}.png" 请求多个尺寸，取两家实测并集
+# （百度网盘/影视 trim.media 与 Jellyfin）全部补齐；校验内容/权限/owner
+UI_ICON_SIZES="16 24 32 48 64 72 96 128 256"
+check_ui_icons() {
+    local ref="$1" label="$2"
+    local size=""
+    for size in ${UI_ICON_SIZES}; do
+        local f="${APP_DEST}/ui/images/${size}.png"
+        [ -f "${f}" ] || { echo "FAIL: ${label} 未补齐 ui/images/${size}.png"; exit 1; }
+        cmp -s "${f}" "${ref}" \
+            || { echo "FAIL: ${label} ${size}.png 内容与基准不一致"; exit 1; }
+        [ "$(stat -c %a "${f}")" = "644" ] \
+            || { echo "FAIL: ${label} ${size}.png 权限非 644"; exit 1; }
+        [ "$(stat -c %u:%g "${f}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
+            || { echo "FAIL: ${label} ${size}.png owner 与 ui/config 不一致"; exit 1; }
+    done
+    [ "$(stat -c %a "${APP_DEST}/ui/images")" = "755" ] \
+        || { echo "FAIL: ${label} ui/images 目录权限非 755"; exit 1; }
+    [ "$(find "${APP_DEST}/ui/images" -maxdepth 1 -name '*.png' | wc -l)" -eq 9 ] \
+        || { echo "FAIL: ${label} ui/images 下 png 文件数非 9"; exit 1; }
+    echo "    [OK]   ${label}：ui/images 补齐 9 个尺寸（16/24/32/48/64/72/96/128/256.png，644/755，owner 与 ui/config 一致）"
+}
+
 # 模拟 0.1.2 → 0.1.3 升级场景（fnOS 升级不补齐新增的 ui/images 目录，手机 App
-# 图标缺失）：service_postupgrade 应从包内 ICON_256.PNG 兜底复制 256.png
+# 图标缺失）：service_postupgrade 应从包内 ICON_256.PNG 兜底生成全部尺寸
 rm -rf "${APP_DEST}/ui/images"
 "${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
 ICON="${APP_DEST}/ui/images/256.png"
-[ -f "${ICON}" ] || { echo "FAIL: service_postupgrade 未补齐 ui/images/256.png"; exit 1; }
-cmp -s "${ICON}" "${APP_DEST}/ICON_256.PNG" \
-    || { echo "FAIL: ui/images/256.png 与 ICON_256.PNG 内容不一致"; exit 1; }
-[ "$(stat -c %a "${ICON}")" = "644" ] || { echo "FAIL: 256.png 权限非 644"; exit 1; }
-[ "$(stat -c %a "${APP_DEST}/ui/images")" = "755" ] \
-    || { echo "FAIL: ui/images 目录权限非 755"; exit 1; }
-[ "$(stat -c %u:%g "${ICON}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
-    || { echo "FAIL: 256.png owner 与 ui/config 不一致"; exit 1; }
-echo "    [OK]   service_postupgrade 兜底生成 ui/images/256.png（644/755，owner 与 ui/config 一致）"
+check_ui_icons "${APP_DEST}/ICON_256.PNG" "service_postupgrade 兜底（包内 ICON_256.PNG 源）"
 
 # 模拟 0.1.4 实机场景（飞牛安装日志）：fpk 根目录的 ICON_256.PNG 被提取到框架注册
 # 目录 /var/apps/${TRIM_APPNAME}/，应用安装目录下反而没有；service_postupgrade
-# 应从 /var/apps 源兜底生成 256.png
+# 应从 /var/apps 源兜底生成全部尺寸
 FRAMEWORK_DIR="/var/apps/${TRIM_APPNAME}"
 if [ -f "${FRAMEWORK_DIR}/ICON_256.PNG" ]; then
     # 真机/已有安装场景：文件已存在则直接作为源与比对基准，不做任何删除
@@ -256,13 +273,7 @@ cp -f "${FRAMEWORK_ICON}" "${FRAMEWORK_REF}"
 rm -f "${APP_DEST}/ICON_256.PNG" "${APP_DEST}/ICON.PNG"
 rm -rf "${APP_DEST}/ui/images"
 "${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
-[ -f "${ICON}" ] || { echo "FAIL: /var/apps 源场景下未补齐 ui/images/256.png"; exit 1; }
-cmp -s "${ICON}" "${FRAMEWORK_REF}" \
-    || { echo "FAIL: 256.png 与 /var/apps 源 ICON_256.PNG 内容不一致"; exit 1; }
-[ "$(stat -c %a "${ICON}")" = "644" ] || { echo "FAIL: /var/apps 场景 256.png 权限非 644"; exit 1; }
-[ "$(stat -c %u:%g "${ICON}")" = "$(stat -c %u:%g "${APP_DEST}/ui/config")" ] \
-    || { echo "FAIL: /var/apps 场景 256.png owner 与 ui/config 不一致"; exit 1; }
-echo "    [OK]   service_postupgrade 从 ${FRAMEWORK_ICON} 兜底生成 256.png（644，owner 与 ui/config 一致）"
+check_ui_icons "${FRAMEWORK_REF}" "service_postupgrade 兜底（/var/apps 源 ${FRAMEWORK_ICON}）"
 # 恢复安装目录图标副本供后续 prestart/幂等用例使用；框架目录仅在我们创建时清理
 cp -f "${FRAMEWORK_REF}" "${APP_DEST}/ICON_256.PNG"
 if [ -n "${FRAMEWORK_ICON_CREATED}" ]; then
@@ -271,17 +282,30 @@ if [ -n "${FRAMEWORK_ICON_CREATED}" ]; then
     FRAMEWORK_ICON_CREATED=""
 fi
 
+# 模拟 0.1.5 → 0.1.6 升级场景（当前实机状态）：256.png 已存在但其余尺寸缺失，
+# 升级后应补齐其余尺寸，且 256.png 不被覆盖（幂等）
+ICON_REF="${WORK}/icon256.pre-upgrade.ref"
+cp -f "${ICON}" "${ICON_REF}"
+rm -f "${APP_DEST}"/ui/images/{16,24,32,48,64,72,96,128}.png
+"${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
+cmp -s "${ICON}" "${ICON_REF}" \
+    || { echo "FAIL: 0.1.5→0.1.6 场景 256.png 被重新生成（应幂等跳过）"; exit 1; }
+check_ui_icons "${APP_DEST}/ICON_256.PNG" "0.1.5→0.1.6 升级（仅 256.png 存在，补齐其余尺寸）"
+
 # service_prestart 兜底：再次删除后 main start 也应补齐，且已存在时不覆盖（幂等）
 rm -rf "${APP_DEST}/ui/images"
 "${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
-[ -f "${ICON}" ] || { echo "FAIL: service_prestart 未补齐 ui/images/256.png"; exit 1; }
+check_ui_icons "${APP_DEST}/ICON_256.PNG" "service_prestart 兜底补齐"
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
 printf 'dirty' >> "${ICON}"
+printf 'dirty' >> "${APP_DEST}/ui/images/128.png"
 "${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
 grep -q "dirty" "${ICON}" \
-    || { echo "FAIL: 已存在的图标被重新生成（应幂等跳过）"; exit 1; }
+    || { echo "FAIL: 已存在的 256.png 被重新生成（应幂等跳过）"; exit 1; }
+grep -q "dirty" "${APP_DEST}/ui/images/128.png" \
+    || { echo "FAIL: 已存在的 128.png 被重新生成（应幂等跳过）"; exit 1; }
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
-echo "    [OK]   service_prestart 兜底补齐且幂等（已存在不覆盖）"
+echo "    [OK]   service_prestart 兜底补齐且幂等（已存在尺寸不覆盖）"
 
 # 模拟升级后配置丢失：删除 nginx.conf，main start 应从 settings 兜底重建
 rm -f "${TRIM_PKGVAR}/nginx.conf"

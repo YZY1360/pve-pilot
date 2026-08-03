@@ -190,45 +190,70 @@ sync_ui_config_port() {
 
 # ---- 手机 App 图标兜底补全 -----------------------------------------------------
 # 手机 App 应用列表从 ${TRIM_APPDEST}/ui/images/ 读取图标（ui/config 的
-# "icon": "images/{0}.png" 指向该目录）。ui/images/256.png 自 0.1.3 起才随包生成，
-# 但 fnOS 升级流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 images 缺失，手机 App
-# 不显示图标）。此处从图标源多候选复制兜底：
+# "icon": "images/{0}.png" 指向该目录，{0} 为尺寸数字）。ui/images 自 0.1.3 起才
+# 随包生成，但 fnOS 升级流程不会补齐新增目录（0.1.2 → 0.1.3 升级后 images 缺失，
+# 手机 App 不显示图标）。0.1.5 只补了 256.png，App 仍按需请求多个尺寸（实测本机
+# 正常应用：百度网盘/影视 trim.media 为 16/24/48/64/72/96/128/256，Jellyfin 为
+# 16/24/32/48/64/72/128/256），其余尺寸 404 时图标仍缺失，故取两家并集全部补齐
+# （飞牛系统无 PIL / ImageMagick 不能缩放，直接把 256.png 复制为其他尺寸文件名，
+# App/系统按需缩放显示，文件存在即可）。
+# 源图标多候选：
 #   - 优先 ${TRIM_APPDEST}/ICON_256.PNG；其次 /var/apps/${TRIM_APPNAME}/ICON_256.PNG
 #     （实测：fnOS 安装/升级把 fpk 根目录的 ICON.PNG / ICON_256.PNG 提取到框架注册
 #     目录，应用安装目录下反而不存在）；最后 ${TRIM_APPDEST}/ICON.PNG
-#   - 已存在则跳过（幂等；全新安装的 fpk 自带该文件）
+#   - 各尺寸已存在则跳过（幂等；全新安装的 fpk 自带 256.png）
 #   - 复制失败仅告警，不阻塞安装/启动
-#   - owner 与 ui/config 保持一致（应用用户 pvepilot:pvepilot），权限 755/644
+#   - owner 与 ui/config 保持一致（应用用户 pvepilot:pvepilot），目录/文件权限 755/644
 # 注意：仅新增 ui/images 子目录与文件，不改动 ui/config，与 sync_ui_config_port 互不影响
 ensure_ui_icon() {
     [ -n "${TRIM_APPDEST:-}" ] || return 1
     local ui_config="${TRIM_APPDEST}/ui/config"
     local ui_images="${TRIM_APPDEST}/ui/images"
     local ui_icon="${ui_images}/256.png"
-    if [ -f "${ui_icon}" ]; then
-        return 0
+    # 两家实测并集的全部可能请求尺寸（16/24/32/48/64/72/96/128/256.png）
+    local icon_sizes=(16 24 32 48 64 72 96 128 256)
+
+    # 256.png 缺失时才从图标源复制；已存在则跳过，只补齐其余尺寸
+    # （0.1.5 → 0.1.6 升级时用户已有 256.png，但其余尺寸缺失，必须继续补齐）
+    if [ ! -f "${ui_icon}" ]; then
+        # 源图标多候选：应用安装目录根部、框架注册目录 /var/apps/${TRIM_APPNAME}/、再退回 ICON.PNG
+        local icon_src=""
+        if [ -f "${TRIM_APPDEST}/ICON_256.PNG" ]; then
+            icon_src="${TRIM_APPDEST}/ICON_256.PNG"
+        elif [ -n "${TRIM_APPNAME:-}" ] && [ -f "/var/apps/${TRIM_APPNAME}/ICON_256.PNG" ]; then
+            icon_src="/var/apps/${TRIM_APPNAME}/ICON_256.PNG"
+        elif [ -f "${TRIM_APPDEST}/ICON.PNG" ]; then
+            icon_src="${TRIM_APPDEST}/ICON.PNG"
+        fi
+        if [ -z "${icon_src}" ]; then
+            install_log "警告: 未找到 ${TRIM_APPDEST}/ICON_256.PNG、/var/apps/${TRIM_APPNAME:-}/ICON_256.PNG、${TRIM_APPDEST}/ICON.PNG，跳过手机 App 图标兜底补全"
+            return 1
+        fi
+        if ! ${MKDIR} "${ui_images}" 2>/dev/null; then
+            install_log "警告: 创建 ${ui_images} 失败，跳过手机 App 图标兜底补全"
+            return 1
+        fi
+        if ! ${CP} "${icon_src}" "${ui_icon}" 2>/dev/null; then
+            install_log "警告: 复制 ${icon_src} -> ${ui_icon} 失败，手机 App 可能不显示图标"
+            return 1
+        fi
     fi
-    # 源图标多候选：应用安装目录根部、框架注册目录 /var/apps/${TRIM_APPNAME}/、再退回 ICON.PNG
-    local icon_src=""
-    if [ -f "${TRIM_APPDEST}/ICON_256.PNG" ]; then
-        icon_src="${TRIM_APPDEST}/ICON_256.PNG"
-    elif [ -n "${TRIM_APPNAME:-}" ] && [ -f "/var/apps/${TRIM_APPNAME}/ICON_256.PNG" ]; then
-        icon_src="/var/apps/${TRIM_APPNAME}/ICON_256.PNG"
-    elif [ -f "${TRIM_APPDEST}/ICON.PNG" ]; then
-        icon_src="${TRIM_APPDEST}/ICON.PNG"
-    fi
-    if [ -z "${icon_src}" ]; then
-        install_log "警告: 未找到 ${TRIM_APPDEST}/ICON_256.PNG、/var/apps/${TRIM_APPNAME:-}/ICON_256.PNG、${TRIM_APPDEST}/ICON.PNG，跳过手机 App 图标兜底补全"
-        return 1
-    fi
-    if ! ${MKDIR} "${ui_images}" 2>/dev/null; then
-        install_log "警告: 创建 ${ui_images} 失败，跳过手机 App 图标兜底补全"
-        return 1
-    fi
-    if ! ${CP} "${icon_src}" "${ui_icon}" 2>/dev/null; then
-        install_log "警告: 复制 ${icon_src} -> ${ui_icon} 失败，手机 App 可能不显示图标"
-        return 1
-    fi
+
+    # 把 256.png 复制为其余尺寸文件名（内容相同）；已存在则跳过（幂等），
+    # 复制失败仅告警不阻塞
+    local size=""
+    for size in "${icon_sizes[@]}"; do
+        local icon_file="${ui_images}/${size}.png"
+        if [ -f "${icon_file}" ]; then
+            continue
+        fi
+        if ! ${CP} "${ui_icon}" "${icon_file}" 2>/dev/null; then
+            install_log "警告: 复制 ${ui_icon} -> ${icon_file} 失败（跳过，手机 App 该尺寸可能不显示图标）"
+            continue
+        fi
+        chmod 644 "${icon_file}" 2>/dev/null || true
+    done
+
     chmod 755 "${ui_images}" 2>/dev/null || true
     chmod 644 "${ui_icon}" 2>/dev/null || true
     # owner 与 ui/config 保持一致（应用用户）；stat 不可用时跳过 chown（不阻塞）
@@ -237,10 +262,15 @@ ensure_ui_icon() {
         ui_owner=$(stat -c '%U:%G' "${ui_config}" 2>/dev/null) \
             || ui_owner=$(stat -c '%u:%g' "${ui_config}" 2>/dev/null) || ui_owner=""
         if [ -n "${ui_owner}" ]; then
-            chown "${ui_owner}" "${ui_images}" "${ui_icon}" 2>/dev/null || true
+            chown "${ui_owner}" "${ui_images}" 2>/dev/null || true
+            for size in "${icon_sizes[@]}"; do
+                if [ -f "${ui_images}/${size}.png" ]; then
+                    chown "${ui_owner}" "${ui_images}/${size}.png" 2>/dev/null || true
+                fi
+            done
         fi
     fi
-    install_log "已补全手机 App 图标: ${ui_icon}"
+    install_log "已补全手机 App 图标: ${ui_images}（${#icon_sizes[@]} 个尺寸）"
     return 0
 }
 
