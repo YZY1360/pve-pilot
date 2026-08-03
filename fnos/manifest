@@ -1,10 +1,10 @@
 appname         = pvepilot
-version         = 0.1.9
+version         = 0.1.10
 display_name    = PVE 管家
 platform        = x86
-maintainer      = pve-pilot
+maintainer      = YZY1360
 maintainer_url  = https://github.com/YZY1360/pve-pilot
-distributor     = pve-pilot
+distributor     = 啊一哦诶
 distributor_url = https://github.com/YZY1360/pve-pilot
 desktop_uidir   = ui
 desktop_applaunchname = pvepilot.Application
