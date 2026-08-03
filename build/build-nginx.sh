@@ -9,7 +9,9 @@
 #
 # 模块取舍（对应任务书 §7）：
 #   - 启用：http_proxy_module（默认）、http_ssl_module、stream_module(+ssl)、
-#     PCRE2（供 proxy_cookie_flags ~ 正则匹配，透传时剥离 PVE 的 Secure cookie）
+#     http_sub_module（0.1.7 起 http 直连时改写 PVE 前端 JS 的 Secure cookie 写入，
+#     sub_filter 精确字节匹配）、PCRE2（供 proxy_cookie_flags ~ 正则匹配，
+#     透传时剥离服务端 Set-Cookie 的 Secure 标志）
 #   - 关闭：rewrite（保留 pcre2 但不用 rewrite 模块）、gzip（省 zlib）及其余
 #     用不到的内容模块，以控制二进制体积（目标 ~5MB）
 #
@@ -34,6 +36,7 @@ PCRE2_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2
 # 模块裁剪：保留 proxy/ssl/stream，去掉用不到的内容模块
 CONFIGURE_MODULE_OPTS=(
     --with-http_ssl_module
+    --with-http_sub_module
     --with-stream
     --with-stream_ssl_module
     --with-pcre

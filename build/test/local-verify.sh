@@ -7,14 +7,17 @@
 #   2. §5 配置要点逐项核对
 #   3. nginx -t 配置语法校验
 #   4. 真实启动 nginx 并经由本地自签 HTTPS 后端做端到端透传
-#      （验证 Host 头透传、https→https 自签后端、websocket 头、HTTP 301→HTTPS）
+#      （验证 Host 头透传、https→https 自签后端、websocket 头、0.1.7 纯 HTTP
+#      直连 200 透传、sub_filter 把 PVE 前端 JS 的 Secure cookie 写入改写为 false）
 #   5. config_callback 重写配置并重启（改监听端口，ui/config 端口声明联动）
 #   6. main stop/status/restart
 #   7. 手机 App 图标兜底补全：ui/images 多尺寸（16/24/32/48/64/72/96/128/256）
 #      + 各尺寸幂等
+#   8. 0.1.6 → 0.1.7 升级：旧 ssl 监听 + 497 跳转配置自动重建为纯 HTTP + sub_filter
 #
 # 用法：./build/test/local-verify.sh
 # 环境：需可执行 fnos/bin/nginx（x86_64 或 aarch64 本机二进制）
+#       且该二进制编译了 --with-http_sub_module（0.1.7 起 build/build-nginx.sh 已启用）
 # ============================================================================
 set -euo pipefail
 
@@ -56,17 +59,78 @@ import json
 import ssl
 import sys
 
+# 模拟 PVE 9.2.6 的 /proxmoxlib.js 响应：包含 pwt authSet（参数 20 空格缩进）与
+# authClear（参数 16 空格缩进）两处 Secure=true 的 auth cookie 写入，另加一个同
+# 缩进但不同上下文的非 auth cookie 写入（PVELangCookie），用于验证 sub_filter
+# 带上下文匹配、不会误替换。
+PROXMOXLIB_JS = """\
+/*
+ * proxmox-widget-toolkit（本地验证用摘录，缩进与 PVE 9.2.6 线上一致）
+ */
+Ext.define('Proxmox.Utils', {
+    setAuthData: function (data) {
+        Proxmox.UserName = data.username;
+        Proxmox.LoggedOut = data.LoggedOut;
+        if (data.ticket) {
+            Proxmox.CSRFPreventionToken = data.CSRFPreventionToken;
+            Ext.util.Cookies.set(
+                    Proxmox.Setup.auth_cookie_name,
+                    data.ticket,
+                    null,
+                    '/',
+                    null,
+                    true,
+                    'lax',
+                );
+        }
+    },
+
+    authClear: function () {
+        if (Proxmox.LoggedOut) {
+            return;
+        }
+        Ext.util.Cookies.set(
+                Proxmox.Setup.auth_cookie_name,
+                '',
+                new Date(0),
+                null,
+                null,
+                true,
+                'lax',
+            );
+    },
+
+    setLangCookie: function (value) {
+        var dt = new Date(0);
+        Ext.util.Cookies.set(
+                    'PVELangCookie',
+                    value,
+                    dt,
+                    null,
+                    null,
+                    true,
+                );
+    }
+});
+"""
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _reply(self):
-        body = json.dumps({
-            "path": self.path,
-            "headers": {k: v for k, v in self.headers.items()},
-            "remote": self.client_address[0],
-        }).encode()
+        if self.path in ("/proxmoxlib.js", "/pve2/js/pvemanagerlib.js"):
+            body = PROXMOXLIB_JS.encode()
+            ctype = "application/javascript"
+        else:
+            body = json.dumps({
+                "path": self.path,
+                "headers": {k: v for k, v in self.headers.items()},
+                "remote": self.client_address[0],
+            }).encode()
+            ctype = "application/json"
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -115,14 +179,16 @@ echo
 echo "[3/7] §5 透传配置要点逐项核对"
 CONF="${TRIM_PKGVAR}/nginx.conf"
 checks=(
-    "listen       8006 ssl;|透传端口 8006（HTTPS 单监听）"
-    "ssl_certificate     ${TRIM_PKGVAR}/server.crt;|ssl_certificate 指向 TRIM_PKGVAR"
-    "error_page   497 =301 https://\$host:8006\$request_uri;|HTTP 访问 301 到 HTTPS（同端口）"
+    "listen       8006;|透传端口 8006（纯 HTTP 单监听，无 ssl）"
     "server_name  _;|server_name _"
     "proxy_pass        https://127.0.0.1:8007;|proxy_pass https://地址:端口"
     "proxy_set_header  Host \$host;|Host 头必须透传"
     "proxy_set_header  X-Forwarded-Proto \$scheme;|X-Forwarded-Proto 透传原始协议"
     "proxy_cookie_flags ~ nosecure;|剥离后端 Set-Cookie 的 Secure 标志（双保险）"
+    "sub_filter_types application/javascript;|sub_filter_types 覆盖 JS 响应"
+    "sub_filter \"Ext.util.Cookies.set(|sub_filter 改写 PVE 前端 JS cookie 写入"
+    "sub_filter_once off;|sub_filter_once off（多处出现全部替换）"
+    "proxy_set_header  Accept-Encoding \"\";|强制后端返回未压缩响应（否则 sub_filter 无法匹配压缩字节）"
     "proxy_http_version 1.1;|HTTP/1.1"
     "proxy_set_header  Upgrade \$http_upgrade;|websocket Upgrade"
     "proxy_set_header  Connection \"upgrade\";|websocket Connection"
@@ -146,6 +212,20 @@ for item in "${checks[@]}"; do
 done
 [ "${ok}" -eq "${#checks[@]}" ] || exit 1
 
+# 0.1.7 起不得再出现 0.1.3-0.1.6 的 ssl/497 配置（纯 HTTP 直连，无证书跳转）
+bad_patterns=(
+    "listen       8006 ssl"
+    "ssl_certificate"
+    "error_page"
+)
+for bad in "${bad_patterns[@]}"; do
+    if grep -qF -- "${bad}" "${CONF}"; then
+        echo "    [FAIL] 配置仍含 0.1.6 及更早的 HTTPS 跳转指令（${bad}）"
+        exit 1
+    fi
+done
+echo "    [OK]   无 ssl 监听 / ssl_certificate / error_page 497（纯 HTTP 直连）"
+
 # ---- 4. nginx -t 配置校验 -----------------------------------------------------
 echo
 echo "[4/7] nginx -t 配置校验"
@@ -153,29 +233,57 @@ echo "[4/7] nginx -t 配置校验"
 
 # ---- 5. 启动 nginx 并端到端验证 ------------------------------------------------
 echo
-echo "[5/7] main start + 端到端透传"
+echo "[5/7] main start + 端到端透传（0.1.7 纯 HTTP 直连 + sub_filter 改写）"
 "${ROOT}/fnos/cmd/main" start
 NGINX_PID=$(cat "${TRIM_PKGVAR}/pvepilot.pid")
 "${ROOT}/fnos/cmd/main" status
 
-echo "    curl http://127.0.0.1:8006/ → 应 301 到 https"
+echo "    curl http://127.0.0.1:8006/pve/test → 应直接 200 透传（无 301、无证书校验）"
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
     -H "Host: test.fnos.net" http://127.0.0.1:8006/pve/test 2>/dev/null || true)
-[ "${HTTP_CODE}" = "301" ] || { echo "FAIL: HTTP 未 301 到 HTTPS（code=${HTTP_CODE}）"; exit 1; }
-LOC=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 10 \
-    -H "Host: test.fnos.net" http://127.0.0.1:8006/pve/test 2>/dev/null || true)
-[ "${LOC}" = "https://test.fnos.net:8006/pve/test" ] \
-    || { echo "FAIL: 301 Location 错误（${LOC}）"; exit 1; }
-echo "    [OK] HTTP 访问 301 到 HTTPS（Location: ${LOC}）"
-echo "    curl -k https://127.0.0.1:8006/"
-RESP=$(curl -sk --max-time 10 -H "Host: test.fnos.net" \
-    https://127.0.0.1:8006/pve/test 2>/dev/null || true)
+[ "${HTTP_CODE}" = "200" ] || { echo "FAIL: HTTP 未 200 透传（code=${HTTP_CODE}）"; exit 1; }
+RESP=$(curl -s --max-time 10 -H "Host: test.fnos.net" \
+    http://127.0.0.1:8006/pve/test 2>/dev/null || true)
 echo "${RESP}" | python3 -m json.tool 2>/dev/null | sed 's/^/    /' || echo "    RESP: ${RESP}"
 echo "${RESP}" | grep -q '"Host": "test.fnos.net"' \
     || { echo "FAIL: Host 头未透传"; exit 1; }
 echo "${RESP}" | grep -q '"path": "/pve/test"' \
     || { echo "FAIL: 根路径透传异常"; exit 1; }
 echo "    [OK] Host 头与路径透传正确（后端收到的 Host=客户端原始 Host）"
+
+echo "    curl http://127.0.0.1:8006/proxmoxlib.js → sub_filter 把 Secure 参数改写为 false"
+RESP_JS="${WORK}/proxmoxlib.out"
+HTTP_JS_CODE=$(curl -s -o "${RESP_JS}" -w '%{http_code}' --max-time 10 \
+    -H "Host: test.fnos.net" http://127.0.0.1:8006/proxmoxlib.js 2>/dev/null || true)
+[ "${HTTP_JS_CODE}" = "200" ] || { echo "FAIL: /proxmoxlib.js 未 200（code=${HTTP_JS_CODE}）"; exit 1; }
+python3 - "${RESP_JS}" <<'PYEOF'
+import sys
+
+body = open(sys.argv[1], encoding="utf-8").read()
+required = [
+    # authSet（20 空格缩进）：secure 参数应被改写为 false
+    "data.ticket,\n                    null,\n                    '/',\n                    null,\n                    false,",
+    # authClear（16 空格缩进）：secure 参数应被改写为 false
+    "                '',\n                new Date(0),\n                null,\n                null,\n                false,",
+    # 非 auth cookie 写入（不同上下文、同缩进）必须保持 true：证明 sub_filter 未误替换
+    "'PVELangCookie',\n                    value,\n                    dt,\n                    null,\n                    null,\n                    true,",
+    # 其余 JS 结构完整（lax 参数仍在）
+    "'lax',",
+]
+for pat in required:
+    if pat not in body:
+        print("FAIL: 响应缺少期望片段: " + repr(pat[:60]))
+        sys.exit(1)
+for pat in [
+    "data.ticket,\n                    null,\n                    '/',\n                    null,\n                    true,",
+    "                '',\n                new Date(0),\n                null,\n                null,\n                true,",
+]:
+    if pat in body:
+        print("FAIL: Secure=true 未被改写: " + repr(pat[:60]))
+        sys.exit(1)
+print("    [OK] sub_filter 已把 authSet/authClear 的 Secure=true 改写为 false，PVELangCookie 等无关调用不受影响")
+PYEOF
+echo "    [OK] 纯 HTTP 直连 200 + sub_filter 改写生效（http 请求无 301）"
 
 # ---- 6. config_callback 重写配置并重启 -----------------------------------------
 echo
@@ -185,14 +293,14 @@ export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
 "${ROOT}/fnos/cmd/config_callback" >/dev/null 2>&1
 echo "    config_callback 退出码=$?"
-grep -q "listen       8801 ssl;" "${CONF}" || { echo "FAIL: 配置未重写"; exit 1; }
+grep -q "listen       8801;" "${CONF}" || { echo "FAIL: 配置未重写"; exit 1; }
 sleep 1
-if curl -sk --max-time 5 -o /dev/null http://127.0.0.1:8801/; then
+if curl -s --max-time 5 -o /dev/null http://127.0.0.1:8801/; then
     echo "    [OK] 新端口 8801 已监听（服务重启成功）"
 else
     echo "FAIL: 8801 未监听"; exit 1
 fi
-if curl -sk --max-time 3 -o /dev/null http://127.0.0.1:8006/ 2>/dev/null; then
+if curl -s --max-time 3 -o /dev/null http://127.0.0.1:8006/ 2>/dev/null; then
     echo "FAIL: 旧端口 8006 仍监听"; exit 1
 else
     echo "    [OK] 旧端口 8006 已释放"
@@ -307,11 +415,40 @@ grep -q "dirty" "${APP_DEST}/ui/images/128.png" \
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
 echo "    [OK]   service_prestart 兜底补齐且幂等（已存在尺寸不覆盖）"
 
+# 模拟 0.1.6 → 0.1.7 升级场景：旧配置为 ssl 监听 + error_page 497 跳转，升级后必须
+# 重建为 0.1.7 纯 HTTP + sub_filter 方案（否则 App WebView 黑屏/登录 401 依旧）
+cat > "${TRIM_PKGVAR}/nginx.conf" <<'OLDEOF'
+worker_processes auto;
+events {
+    worker_connections 1024;
+}
+http {
+    server {
+        listen       8801 ssl;
+        server_name  _;
+        ssl_certificate     /tmp/server.crt;
+        ssl_certificate_key /tmp/server.key;
+        error_page   497 =301 https://$host:8801$request_uri;
+        location / {
+            proxy_pass        https://127.0.0.1:8007;
+        }
+    }
+}
+OLDEOF
+"${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
+grep -qF "sub_filter_types" "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 0.1.6→0.1.7 升级未重建配置（无 sub_filter）"; exit 1; }
+grep -qF "error_page" "${TRIM_PKGVAR}/nginx.conf" \
+    && { echo "FAIL: 升级重建后仍残留 error_page 497"; exit 1; }
+grep -qF "listen       8801;" "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 升级重建后监听端口丢失"; exit 1; }
+echo "    [OK]   0.1.6→0.1.7 升级：旧 ssl/497 配置自动重建为纯 HTTP + sub_filter（保留 8801）"
+
 # 模拟升级后配置丢失：删除 nginx.conf，main start 应从 settings 兜底重建
 rm -f "${TRIM_PKGVAR}/nginx.conf"
 "${ROOT}/fnos/cmd/main" start >/dev/null 2>&1
 sleep 1
-grep -q "listen       8801 ssl;" "${TRIM_PKGVAR}/nginx.conf" \
+grep -q "listen       8801;" "${TRIM_PKGVAR}/nginx.conf" \
     && echo "    [OK]   配置缺失时自动按保存的设置重建（8801）" \
     || { echo "FAIL: 配置缺失未自动重建"; exit 1; }
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1

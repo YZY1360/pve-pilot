@@ -58,6 +58,8 @@ jobs:
       # 编译进 PCRE2，nginx -t 会直接报 "requires PCRE library" 而失败，
       # 因此 nginx -t 通过即为 PCRE2 静态链接成功的功能性证明（-V 仅确认
       # configure 参数带了 --with-pcre 指向 pcre2 源码）。
+      # 0.1.7 起配置含 sub_filter / sub_filter_types（http_sub_module），
+      # nginx -t 通过同时证明 --with-http_sub_module 已编译进二进制。
       # arm 二进制无法在 x86 runner 上执行，该校验只在 x86 job 做一次即可
       - name: Validate generated nginx config (${{ matrix.arch }})
         if: matrix.arch == 'x86'

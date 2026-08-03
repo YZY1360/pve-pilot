@@ -1,5 +1,5 @@
 appname         = pvepilot
-version         = 0.1.6
+version         = 0.1.7
 display_name    = PVE 管家
 platform        = x86
 maintainer      = pve-pilot

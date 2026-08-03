@@ -16,14 +16,22 @@
 #   1. 根路径全量透传（PVE WebUI 不支持子目录）
 #   2. Host 头必须透传（否则登录后白屏/重定向循环）
 #   3. proxy_ssl_verify off（PVE 8006 为自签 HTTPS，后端不校验证书）
-#   4. 同一透传端口同时服务 http+https（自签证书）：PVE 登录 cookie 由前端 JS
-#      写入且硬编码 Secure 属性（proxmoxlib.js authSet），浏览器只在安全上下文
-#      （HTTPS）下保存；HTTP 访问 301 到 HTTPS 后登录态才能持久。nginx 实测不支持
-#      同 server 块内 "listen PORT ssl; listen PORT;"（1.28.3 报 duplicate listen，
-#      双 server 块同端口会互相抢占导致明文 HTTP 400），故采用单一 ssl 监听 +
-#      error_page 497 把明文 HTTP 请求 301 到 HTTPS（同一端口，效果等价）。
-#      proxy_cookie_flags ~ nosecure 只处理服务端 Set-Cookie 响应头，对 JS 写入的
-#      cookie 无效，保留仅用于剥离后端下发的 Secure 标志（双保险，纯 HTTP 降级时必需）。
+#   4. 0.1.7 起纯 HTTP 直连 + sub_filter 剥离 PVE 前端 JS 的 Secure cookie：
+#      PVE 登录 cookie 由前端 JS 写入且硬编码 Secure 属性（proxmoxlib.js 的
+#      authSet/authClear，Ext.util.Cookies.set 第 6 参数 true），浏览器只在安全
+#      上下文（HTTPS）下保存。0.1.3-0.1.6 曾用同一透传端口 http→https（ssl 监听 +
+#      error_page 497 重定向到 https://$host:端口），PC 浏览器可手动跳过自签证书
+#      告警，但飞牛 App 内嵌 WebView 无法跳过证书校验（黑屏加载条）；0.1.7 起去掉
+#      497 与 ssl 监听、纯 http 直连（http 连接无证书校验概念），并用 nginx
+#      sub_filter 精确改写响应流里两处 secure 参数 true→false（sub_filter 是字节串
+#      精确匹配、无正则，需带足够上下文避免误替换；缩进以 PVE 9.2.6 实测/上游
+#      proxmox-widget-toolkit 源码为准：authSet 参数 20 空格、authClear 16 空格）。
+#      同时 proxy_set_header Accept-Encoding "" 强制后端返回未压缩响应——PVE
+#      pveproxy 对声明 gzip 的客户端会把 JS 压缩（>1024 字节），压缩字节无法被
+#      sub_filter 匹配。proxy_cookie_flags ~ nosecure 保留，双保险剥离服务端
+#      Set-Cookie 响应头的 Secure 标志。
+#      局限：sub_filter 依赖 JS 内的精确字符串，PVE 大版本升级若改动 proxmoxlib.js
+#      写法则改写失效（表现：登录后立即 401），需同步更新本文件的匹配串。
 #   5. 透传端口由向导可改：配置生成后把实际端口同步写回 ${TRIM_APPDEST}/ui/config，
 #      保证桌面入口 / FN Connect 指向正确端口（声明永远跟随实际）。
 #   6. 手机 App 应用列表图标（ui/images/256.png）由生命周期钩子兜底补全：fnOS 升级
@@ -47,7 +55,7 @@ PVE_SETTINGS="${TRIM_PKGVAR}/settings"      # 最近一次向导输入（升级/
 PVE_LOG_DIR="${TRIM_PKGVAR}/logs"
 PVE_TMP_DIR="${TRIM_PKGVAR}/tmp"
 PVE_PID="${TRIM_PKGVAR}/nginx.pid"
-PVE_CERT="${TRIM_PKGVAR}/server.crt"        # 自签 TLS 证书（同一端口 http→https 用）
+PVE_CERT="${TRIM_PKGVAR}/server.crt"        # 自签 TLS 证书（0.1.7 起配置不再启用 ssl，仅保留供未来切回 https）
 PVE_CERT_KEY="${TRIM_PKGVAR}/server.key"    # 自签私钥（权限 600；升级/重启保留）
 
 # 服务启动命令：nginx 前台运行（daemon off），进程由公共框架托管
@@ -96,10 +104,9 @@ port_in_use() {
 }
 
 # ---- TLS 自签证书 ----------------------------------------------------------------
-# PVE 登录 cookie 由前端 JS 写入（proxmox-widget-toolkit 的 authSet），Secure 参数
-# 硬编码 true，浏览器只在安全上下文（HTTPS）下保存。因此 nginx 在同一透传端口同时
-# 服务 http+https（单一 ssl 监听 + error_page 497 把明文 HTTP 301 到 HTTPS）；自签
-# 证书解决本机 HTTPS 证书来源。
+# 0.1.7 起生成的配置不再启用 ssl（纯 HTTP 直连，见头部约束 4），证书函数与证书文件
+# 保留在代码中供未来切回 https 方案时使用。ensure_tls_cert 幂等生成 10 年自签证书，
+# 生成失败/缺失不影响 http 透传（调用处均以 || true 守护，失败仅告警）。
 
 # collect_local_ipv4：收集本机非回环 IPv4（SAN 覆盖"飞牛本机 IP"访问方式）
 collect_local_ipv4() {
@@ -133,7 +140,7 @@ ensure_tls_cert() {
         return 0
     fi
     if ! command -v openssl >/dev/null 2>&1; then
-        install_log "警告: 未找到 openssl，无法生成自签证书，降级为纯 HTTP 透传"
+        install_log "警告: 未找到 openssl，跳过自签证书生成（纯 HTTP 透传不受影响，未来切回 https 时需证书）"
         return 1
     fi
     local san
@@ -149,11 +156,11 @@ ensure_tls_cert() {
         if [ -n "${USER:-}" ] && [ -n "${GROUP:-}" ]; then
             chown "${USER}:${GROUP}" "${PVE_CERT}" "${PVE_CERT_KEY}" 2>/dev/null || true
         fi
-        install_log "自签证书生成完成: ${PVE_CERT}"
+        install_log "自签证书生成完成（当前纯 HTTP 透传未使用，供未来切回 https）: ${PVE_CERT}"
         return 0
     fi
     ${RM} "${PVE_CERT}" "${PVE_CERT_KEY}" 2>/dev/null || true
-    install_log "警告: 自签证书生成失败，降级为纯 HTTP 透传（不启用 HTTPS 重定向）"
+    install_log "警告: 自签证书生成失败（不影响纯 HTTP 透传，未来切回 https 方案时需重新生成）"
     return 1
 }
 
@@ -304,35 +311,20 @@ generate_nginx_conf() {
             ;;
     esac
 
-    # 4) TLS 自签证书（缺失自动生成、幂等；失败降级纯 HTTP，不阻塞安装/启动）
-    #    同一透传端口同时服务 http+https：nginx 不支持同 server 块写
-    #    "listen X ssl; listen X;"（实测 1.28.3 报 duplicate listen），双 server 块
-    #    同端口又会被合并成单一 ssl socket、明文 HTTP 直接 400；故采用单一 ssl
-    #    监听 + error_page 497（nginx 对"明文 HTTP 打到 ssl 端口"的内部错误码）
-    #    把 HTTP 请求 301 到 https://$host:端口$request_uri，效果等价于同端口双协议。
+    # 4) 运行时目录（0.1.7 起配置不再依赖 TLS 证书：纯 HTTP 直连，见头部约束 4；
+    #    ensure_tls_cert 仅在启动钩子中兜底生成并保留，供未来切回 https 方案）
     ${MKDIR} "${PVE_LOG_DIR}" "${PVE_TMP_DIR}" 2>/dev/null || true
-
-    local ssl_directives="" listen_addr="${proxy_port}" http_to_https_redirect=""
-    if ensure_tls_cert; then
-        ssl_directives="    ssl_certificate     ${PVE_CERT};
-    ssl_certificate_key ${PVE_CERT_KEY};
-    ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-    ssl_session_cache   shared:SSL:10m;
-"
-        listen_addr="${proxy_port} ssl"
-        # 497 = nginx 对"明文 HTTP 请求打到 ssl 端口"的内部错误码；error_page 301
-        # 到 HTTPS（\$ 转义保留 nginx 内置变量，端口用实际透传端口避免脱节）
-        http_to_https_redirect="        error_page   497 =301 https://\$host:${proxy_port}\$request_uri;
-"
-    else
-        install_log "警告: 未启用 HTTPS，降级为纯 HTTP 透传（浏览器将无法保存 PVE 的 Secure cookie）"
-    fi
 
     # 5) 生成配置（\$ 转义保留 nginx 内置变量原样写入）
     cat > "${PVE_CONF}" <<EOF
 # PVE 管家（pve-pilot）nginx 透传配置
 # 由安装/配置向导自动生成，请勿手动修改；如需调整请在应用中心"配置"中修改。
+# 0.1.7 起为纯 HTTP 直连 + sub_filter 方案（无 ssl 监听、无 497 跳转）：
+#   透传端口只监听 http（WebView/浏览器无证书校验问题）；
+#   sub_filter 把 PVE 前端 JS（proxmoxlib.js authSet/authClear）写入登录 cookie 时的
+#   Secure=true 改写为 false，否则 http 下浏览器拒绝保存 Secure cookie → 登录后 401。
+#   局限：sub_filter 是字节串精确匹配，PVE 大版本升级若改动 JS 写法则失效（登录 401），
+#   需同步更新下方 sub_filter 匹配串。
 
 worker_processes auto;
 pid ${PVE_PID};
@@ -354,18 +346,53 @@ http {
     client_body_temp_path ${PVE_TMP_DIR}/client_body;
     proxy_temp_path       ${PVE_TMP_DIR}/proxy;
 
-${ssl_directives}
     server {
-        listen       ${listen_addr};
+        listen       ${proxy_port};
         server_name  _;
 
-${http_to_https_redirect}
         # PVE WebUI 固定使用根路径，必须全量透传（不支持子目录）
         location / {
             proxy_pass        https://${upstream_addr}:${pve_port};
             proxy_set_header  Host \$host;                  # 必须透传：PVE 靠 Host 头拼 URL
-            proxy_set_header  X-Forwarded-Proto \$scheme;   # 透传原始协议（HTTPS 透传下恒为 https）
-            proxy_cookie_flags ~ nosecure;                  # 双保险：剥离后端 Set-Cookie 的 Secure 标志（纯 HTTP 降级时必需）
+            proxy_set_header  X-Forwarded-Proto \$scheme;   # 透传原始协议（纯 HTTP 直连下恒为 http）
+            proxy_cookie_flags ~ nosecure;                  # 双保险：剥离后端 Set-Cookie 的 Secure 标志（纯 HTTP 直连下必需）
+
+            # 0.1.7 纯 HTTP 直连：PVE 登录 cookie 由前端 JS（proxmox-widget-toolkit
+            # proxmoxlib.js 的 authSet/authClear）写入且 Secure=true 硬编码，浏览器在
+            # http 下拒绝保存 → 登录后立即 401。sub_filter 把两处 secure 参数改写为
+            # false（字节串精确匹配、无正则，带完整调用上下文避免误替换；缩进以 PVE
+            # 9.2.6 实测/上游 pwt 源码为准：authSet 参数 20 空格、authClear 16 空格）。
+            sub_filter_types application/javascript;
+            sub_filter "Ext.util.Cookies.set(
+                    Proxmox.Setup.auth_cookie_name,
+                    data.ticket,
+                    null,
+                    '/',
+                    null,
+                    true," "Ext.util.Cookies.set(
+                    Proxmox.Setup.auth_cookie_name,
+                    data.ticket,
+                    null,
+                    '/',
+                    null,
+                    false,";
+            sub_filter "Ext.util.Cookies.set(
+                Proxmox.Setup.auth_cookie_name,
+                '',
+                new Date(0),
+                null,
+                null,
+                true," "Ext.util.Cookies.set(
+                Proxmox.Setup.auth_cookie_name,
+                '',
+                new Date(0),
+                null,
+                null,
+                false,";
+            sub_filter_once off;                            # JS 内多处出现全部替换
+            # PVE pveproxy 对声明 Accept-Encoding: gzip 的客户端会把 JS 压缩（>1024
+            # 字节），压缩字节无法被 sub_filter 匹配；置空该头强制后端返回未压缩响应
+            proxy_set_header  Accept-Encoding "";
             proxy_http_version 1.1;
             proxy_set_header  Upgrade \$http_upgrade;       # noVNC/控制台/任务日志 = websocket
             proxy_set_header  Connection "upgrade";
@@ -443,6 +470,15 @@ service_prestart() {
             "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
             "${PVE_PORT:-${PVE_PORT_DEFAULT}}" \
             "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
+    elif ! grep -qF "sub_filter_types" "${PVE_CONF}" 2>/dev/null; then
+        # 0.1.6 及更早版本的 nginx.conf 为 ssl 监听 + 497 跳转（或无 sub_filter），
+        # 启动前重建为 0.1.7 纯 HTTP + sub_filter 方案（升级残留/降级兜底）
+        install_log "检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.7 纯 HTTP + sub_filter 方案重建"
+        load_saved_settings
+        generate_nginx_conf \
+            "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
+            "${PVE_PORT:-${PVE_PORT_DEFAULT}}" \
+            "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
     fi
     # 启动钩子：同步实际透传端口到 ui/config（覆盖旧版本安装留下的静态 8006）
     load_saved_settings
@@ -472,6 +508,16 @@ service_postupgrade() {
     ensure_ui_icon || true
     if [ ! -f "${PVE_CONF}" ]; then
         install_log "升级后未发现配置，使用保存的设置兜底生成"
+        load_saved_settings
+        generate_nginx_conf \
+            "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
+            "${PVE_PORT:-${PVE_PORT_DEFAULT}}" \
+            "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
+    elif ! grep -qF "sub_filter_types" "${PVE_CONF}" 2>/dev/null; then
+        # 0.1.6 及更早版本的 nginx.conf 是 ssl 监听 + 497 跳转（或无 sub_filter），
+        # 升级到 0.1.7 必须重建为纯 HTTP + sub_filter，否则 App WebView 黑屏
+        # （自签证书无法跳过）与登录 401（Secure cookie 无法保存）依旧
+        install_log "升级检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.7 纯 HTTP + sub_filter 方案重建"
         load_saved_settings
         generate_nginx_conf \
             "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
