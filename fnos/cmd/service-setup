@@ -16,22 +16,38 @@
 #   1. 根路径全量透传（PVE WebUI 不支持子目录）
 #   2. Host 头必须透传（否则登录后白屏/重定向循环）
 #   3. proxy_ssl_verify off（PVE 8006 为自签 HTTPS，后端不校验证书）
-#   4. 0.1.7 起纯 HTTP 直连 + sub_filter 剥离 PVE 前端 JS 的 Secure cookie：
-#      PVE 登录 cookie 由前端 JS 写入且硬编码 Secure 属性（proxmoxlib.js 的
-#      authSet/authClear，Ext.util.Cookies.set 第 6 参数 true），浏览器只在安全
-#      上下文（HTTPS）下保存。0.1.3-0.1.6 曾用同一透传端口 http→https（ssl 监听 +
-#      error_page 497 重定向到 https://$host:端口），PC 浏览器可手动跳过自签证书
-#      告警，但飞牛 App 内嵌 WebView 无法跳过证书校验（黑屏加载条）；0.1.7 起去掉
-#      497 与 ssl 监听、纯 http 直连（http 连接无证书校验概念），并用 nginx
-#      sub_filter 精确改写响应流里两处 secure 参数 true→false（sub_filter 是字节串
-#      精确匹配、无正则，需带足够上下文避免误替换；缩进以 PVE 9.2.6 实测/上游
-#      proxmox-widget-toolkit 源码为准：authSet 参数 20 空格、authClear 16 空格）。
+#   4. 0.1.8 起纯 HTTP 直连 + 两层 Secure cookie 剥离（<head> 注入钩子为主、
+#      逐条 sub_filter 兜底）：
+#      PVE 登录 cookie 由前端写入且硬编码 Secure 属性——桌面版 pwt
+#      proxmoxlib.js 的 authSet/authClear（Ext.util.Cookies.set 第 6 参数 true）；
+#      移动版 yew-mobile（Rust/WASM）在 WASM 二进制内硬编码
+#      "; SameSite=Lax; Secure;"，JS 层只有 set_cookie(value){document.cookie=value;}
+#      无法被字符串匹配改写。浏览器只在安全上下文（HTTPS）下保存 Secure cookie，
+#      纯 http 直连下拒绝保存 → 登录后立即 401。0.1.3-0.1.6 曾用同一透传端口
+#      http→https（ssl 监听 + error_page 497 重定向到 https://$host:端口），PC
+#      浏览器可手动跳过自签证书告警，但飞牛 App 内嵌 WebView 无法跳过证书校验
+#      （黑屏加载条）；0.1.7 起去掉 497 与 ssl 监听、纯 http 直连（http 连接无
+#      证书校验概念）。
+#      0.1.8 起 Secure 剥离改两层：
+#        a) 主方案：sub_filter 在 PVE 所有 HTML 入口（桌面 / 与移动 /yew-mobile/
+#           的 index.html 均含 <head>）的 <head> 后注入一段 JS 钩子，用
+#           Object.defineProperty 覆盖 Document.prototype.cookie 的 setter，写入时
+#           剥掉 Secure 属性——覆盖所有写入方式（pwt 的 Ext.util.Cookies.set、
+#           yew-mobile WASM 的 set_cookie、未来任何写法），不再依赖具体 JS 字符串，
+#           仅依赖几乎不变的 <head> 结构。注意：nginx 把 sub_filter 替换串当复杂值
+#           编译，JS 正则里的字面 $ 会触发 "invalid variable name"，故钩子内用
+#           (v+';') 哨兵 + /;\s*Secure\s*(?=[;,])/gi 实现原正则
+#           /;\s*Secure\s*(?=[;,]|$)/gi 的等价剥离（末尾/分号/逗号后全覆盖）。
+#        b) 兜底：保留 0.1.7 的逐条 sub_filter（authSet/authClear 的 secure 参数
+#           true→false，字节串精确匹配、带完整调用上下文避免误替换；缩进以 PVE
+#           9.2.6 实测/上游 pwt 源码为准：authSet 参数 20 空格、authClear 16 空格）
+#           ——万一钩子因故未执行仍有第二道保险；其失效不再影响主方案。
 #      同时 proxy_set_header Accept-Encoding "" 强制后端返回未压缩响应——PVE
-#      pveproxy 对声明 gzip 的客户端会把 JS 压缩（>1024 字节），压缩字节无法被
-#      sub_filter 匹配。proxy_cookie_flags ~ nosecure 保留，双保险剥离服务端
-#      Set-Cookie 响应头的 Secure 标志。
-#      局限：sub_filter 依赖 JS 内的精确字符串，PVE 大版本升级若改动 proxmoxlib.js
-#      写法则改写失效（表现：登录后立即 401），需同步更新本文件的匹配串。
+#      pveproxy 对声明 gzip 的客户端会把响应压缩（JS >1024 字节默认压缩），压缩
+#      字节无法被 sub_filter 匹配。proxy_cookie_flags ~ nosecure 保留，第三道保险
+#      剥离服务端 Set-Cookie 响应头的 Secure 标志。
+#      局限（已大幅收窄）：主方案仅依赖 <head> 结构（PVE 桌面/移动入口多年稳定）；
+#      兜底逐条匹配仍依赖 JS 精确字符串，但只作双保险，失效不影响主方案。
 #   5. 透传端口由向导可改：配置生成后把实际端口同步写回 ${TRIM_APPDEST}/ui/config，
 #      保证桌面入口 / FN Connect 指向正确端口（声明永远跟随实际）。
 #   6. 手机 App 应用列表图标（ui/images/256.png）由生命周期钩子兜底补全：fnOS 升级
@@ -319,12 +335,18 @@ generate_nginx_conf() {
     cat > "${PVE_CONF}" <<EOF
 # PVE 管家（pve-pilot）nginx 透传配置
 # 由安装/配置向导自动生成，请勿手动修改；如需调整请在应用中心"配置"中修改。
-# 0.1.7 起为纯 HTTP 直连 + sub_filter 方案（无 ssl 监听、无 497 跳转）：
+# 0.1.8 起为纯 HTTP 直连 + 两层 Secure cookie 剥离方案（无 ssl 监听、无 497 跳转）：
 #   透传端口只监听 http（WebView/浏览器无证书校验问题）；
-#   sub_filter 把 PVE 前端 JS（proxmoxlib.js authSet/authClear）写入登录 cookie 时的
-#   Secure=true 改写为 false，否则 http 下浏览器拒绝保存 Secure cookie → 登录后 401。
-#   局限：sub_filter 是字节串精确匹配，PVE 大版本升级若改动 JS 写法则失效（登录 401），
-#   需同步更新下方 sub_filter 匹配串。
+#   1) 主方案：sub_filter 把 PVE 各 HTML 入口（桌面 /、移动 /yew-mobile/）的 <head>
+#      后注入 document.cookie 写入钩子——Object.defineProperty 覆盖
+#      Document.prototype.cookie 的 setter，写入时剥掉 Secure 属性，覆盖所有 cookie
+#      写入方式（pwt Ext.util.Cookies.set / yew-mobile WASM set_cookie / 未来写法）。
+#      注意：sub_filter 替换串被 nginx 当复杂值编译，JS 内字面 $ 会触发
+#      "invalid variable name"，故钩子内用 (v+';') 哨兵 + /;\s*Secure\s*(?=[;,])/gi
+#      实现原正则 /;\s*Secure\s*(?=[;,]|$)/gi 的等价剥离（末尾/分号/逗号后全覆盖）。
+#   2) 兜底：保留 0.1.7 的逐条 sub_filter（authSet/authClear 的 secure 参数
+#      true→false，字节串精确匹配）——万一钩子因故未执行仍有第二道保险，
+#      失效不影响主方案。
 
 worker_processes auto;
 pid ${PVE_PID};
@@ -357,12 +379,21 @@ http {
             proxy_set_header  X-Forwarded-Proto \$scheme;   # 透传原始协议（纯 HTTP 直连下恒为 http）
             proxy_cookie_flags ~ nosecure;                  # 双保险：剥离后端 Set-Cookie 的 Secure 标志（纯 HTTP 直连下必需）
 
-            # 0.1.7 纯 HTTP 直连：PVE 登录 cookie 由前端 JS（proxmox-widget-toolkit
-            # proxmoxlib.js 的 authSet/authClear）写入且 Secure=true 硬编码，浏览器在
-            # http 下拒绝保存 → 登录后立即 401。sub_filter 把两处 secure 参数改写为
-            # false（字节串精确匹配、无正则，带完整调用上下文避免误替换；缩进以 PVE
-            # 9.2.6 实测/上游 pwt 源码为准：authSet 参数 20 空格、authClear 16 空格）。
+            # 0.1.8 主方案：在所有 HTML 入口（桌面 /、移动 /yew-mobile/）的 <head> 后
+            # 注入 document.cookie 写入钩子——Object.defineProperty 覆盖
+            # Document.prototype.cookie 的 setter，写入时剥掉 Secure 属性，覆盖所有
+            # cookie 写入方式（pwt Ext.util.Cookies.set、yew-mobile WASM set_cookie、
+            # 未来任何写法），不再依赖具体 JS 字符串（详见文件头约束 4）。
+            # 注意：sub_filter 替换串被 nginx 当复杂值编译，字面 $ 会触发
+            # "invalid variable name"，故钩子内用 (v+';') 哨兵 +
+            # /;\s*Secure\s*(?=[;,])/gi 实现原正则 /;\s*Secure\s*(?=[;,]|$)/gi
+            # 的等价剥离（末尾/分号/逗号后全覆盖、大小写不敏感、无副作用）。
             sub_filter_types application/javascript;
+            sub_filter "<head>" "<head><script>(function(){var d=Object.getOwnPropertyDescriptor(Document.prototype,'cookie');Object.defineProperty(Document.prototype,'cookie',{set:function(v){d.set.call(this,(v+';').replace(/;\s*Secure\s*(?=[;,])/gi,'').slice(0,-1));},get:function(){return d.get.call(this);},configurable:true});})();</script>";
+            # 0.1.7 兜底（双保险）：精确改写 pwt proxmoxlib.js authSet/authClear 的
+            # secure 参数 true→false（字节串精确匹配、无正则，带完整调用上下文避免
+            # 误替换；缩进以 PVE 9.2.6 实测/上游 pwt 源码为准：authSet 参数 20 空格、
+            # authClear 16 空格）。
             sub_filter "Ext.util.Cookies.set(
                     Proxmox.Setup.auth_cookie_name,
                     data.ticket,
@@ -472,8 +503,17 @@ service_prestart() {
             "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
     elif ! grep -qF "sub_filter_types" "${PVE_CONF}" 2>/dev/null; then
         # 0.1.6 及更早版本的 nginx.conf 为 ssl 监听 + 497 跳转（或无 sub_filter），
-        # 启动前重建为 0.1.7 纯 HTTP + sub_filter 方案（升级残留/降级兜底）
-        install_log "检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.7 纯 HTTP + sub_filter 方案重建"
+        # 启动前重建为 0.1.8 纯 HTTP + 两层 sub_filter 方案（升级残留/降级兜底）
+        install_log "检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.8 纯 HTTP + <head> 注入钩子方案重建"
+        load_saved_settings
+        generate_nginx_conf \
+            "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
+            "${PVE_PORT:-${PVE_PORT_DEFAULT}}" \
+            "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
+    elif ! grep -qF 'sub_filter "<head>"' "${PVE_CONF}" 2>/dev/null; then
+        # 0.1.7 版本配置已有 sub_filter 逐条匹配但缺 <head> 注入钩子（无法覆盖
+        # yew-mobile WASM 等非逐条匹配的 cookie 写入），启动前重建为 0.1.8 方案
+        install_log "检测到 0.1.7 版本配置（缺 <head> 注入钩子），按 0.1.8 纯 HTTP + <head> 注入钩子方案重建"
         load_saved_settings
         generate_nginx_conf \
             "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
@@ -515,9 +555,19 @@ service_postupgrade() {
             "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
     elif ! grep -qF "sub_filter_types" "${PVE_CONF}" 2>/dev/null; then
         # 0.1.6 及更早版本的 nginx.conf 是 ssl 监听 + 497 跳转（或无 sub_filter），
-        # 升级到 0.1.7 必须重建为纯 HTTP + sub_filter，否则 App WebView 黑屏
+        # 升级到 0.1.8 必须重建为纯 HTTP + sub_filter，否则 App WebView 黑屏
         # （自签证书无法跳过）与登录 401（Secure cookie 无法保存）依旧
-        install_log "升级检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.7 纯 HTTP + sub_filter 方案重建"
+        install_log "升级检测到 0.1.6 及更早版本配置（无 sub_filter），按 0.1.8 纯 HTTP + <head> 注入钩子方案重建"
+        load_saved_settings
+        generate_nginx_conf \
+            "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \
+            "${PVE_PORT:-${PVE_PORT_DEFAULT}}" \
+            "${PROXY_PORT:-${PROXY_PORT_DEFAULT}}"
+    elif ! grep -qF 'sub_filter "<head>"' "${PVE_CONF}" 2>/dev/null; then
+        # 0.1.7 版本配置只有逐条 sub_filter，缺 <head> 注入钩子：yew-mobile（WASM
+        # 内硬编码 "; SameSite=Lax; Secure;"）等非逐条匹配的 cookie 写入仍带 Secure，
+        # http 下登录 401。升级到 0.1.8 必须重建为两层方案。
+        install_log "升级检测到 0.1.7 版本配置（缺 <head> 注入钩子），按 0.1.8 纯 HTTP + <head> 注入钩子方案重建"
         load_saved_settings
         generate_nginx_conf \
             "${PVE_ADDR:-${PVE_ADDR_DEFAULT}}" \

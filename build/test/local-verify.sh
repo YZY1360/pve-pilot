@@ -7,17 +7,20 @@
 #   2. §5 配置要点逐项核对
 #   3. nginx -t 配置语法校验
 #   4. 真实启动 nginx 并经由本地自签 HTTPS 后端做端到端透传
-#      （验证 Host 头透传、https→https 自签后端、websocket 头、0.1.7 纯 HTTP
-#      直连 200 透传、sub_filter 把 PVE 前端 JS 的 Secure cookie 写入改写为 false）
+#      （验证 Host 头透传、https→https 自签后端、websocket 头、0.1.8 纯 HTTP
+#      直连 200 透传、<head> 注入的 document.cookie 钩子出现在桌面 / 与移动
+#      /yew-mobile/ 响应中、钩子逻辑对 Secure 属性剥离正确、0.1.7 逐条 sub_filter
+#      兜底仍把 PVE 前端 JS 的 Secure cookie 写入改写为 false）
 #   5. config_callback 重写配置并重启（改监听端口，ui/config 端口声明联动）
 #   6. main stop/status/restart
 #   7. 手机 App 图标兜底补全：ui/images 多尺寸（16/24/32/48/64/72/96/128/256）
 #      + 各尺寸幂等
-#   8. 0.1.6 → 0.1.7 升级：旧 ssl 监听 + 497 跳转配置自动重建为纯 HTTP + sub_filter
+#   8. 升级场景：0.1.6 及更早（ssl/497）与 0.1.7（缺 <head> 注入钩子）配置自动
+#      重建为 0.1.8 纯 HTTP + <head> 注入钩子 + 逐条 sub_filter 兜底
 #
 # 用法：./build/test/local-verify.sh
 # 环境：需可执行 fnos/bin/nginx（x86_64 或 aarch64 本机二进制）
-#       且该二进制编译了 --with-http_sub_module（0.1.7 起 build/build-nginx.sh 已启用）
+#       且该二进制编译了 --with-http_sub_module（build/build-nginx.sh 已启用）
 # ============================================================================
 set -euo pipefail
 
@@ -48,7 +51,7 @@ echo "======================================================"
 
 # ---- 1. 自签 HTTPS 后端（模拟 PVE；监听 8007 避免与透传默认端口 8006 冲突）----
 echo
-echo "[1/7] 准备自签 HTTPS 后端（模拟 PVE）"
+echo "[1/8] 准备自签 HTTPS 后端（模拟 PVE）"
 openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "${WORK}/pve.key" -out "${WORK}/pve.crt" \
     -days 1 -subj "/CN=pve.local" >/dev/null 2>&1
@@ -59,10 +62,57 @@ import json
 import ssl
 import sys
 
+# 模拟 PVE 9.2.6 的桌面 / 入口 index.html.tpl（实测含 <head>；此处为简化版，
+# 结构特征一致：<head> + 标题 + /pve2/js/pvemanagerlib.js）
+DESKTOP_INDEX = """\
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>N100 - Proxmox Virtual Environment</title>
+    <link rel="icon" sizes="128x128" href="/pve2/images/logo-128.png" />
+    <link rel="stylesheet" type="text/css" href="/pve2/ext6/theme-crisp/resources/theme-crisp-all.css" />
+    <script type='text/javascript'>
+        function gettext(message) { return message; }
+    </script>
+  </head>
+  <body>
+    <div id="main_container"></div>
+    <script type="text/javascript" src="/pve2/js/pvemanagerlib.js"></script>
+  </body>
+</html>
+"""
+
+# 模拟 PVE 9.2.x yew-mobile 移动入口 /yew-mobile/ 的 index.html（源自上游
+# pve-yew-mobile-gui 仓库的 index.html.tpl，实测结构含 <head>；cookie 由 WASM
+# 二进制写入，JS 层只有 set_cookie(value){document.cookie = value;}）
+YEW_MOBILE_INDEX = """\
+<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="Content-type" content="text/html; charset=utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>N100 - Proxmox Virtual Environment</title>
+  <link rel="manifest" href="/yew-mobile/manifest.json" />
+  <link rel="stylesheet" type="text/css" href="/yew-mobile/css/pve.css" />
+  <link rel="preload" href="/yew-mobile/js/pve-yew-mobile-gui_bg.wasm?v=1" as="fetch" type="application/wasm" crossorigin="">
+  <link rel="modulepreload" href="/yew-mobile/js/pve-yew-mobile-gui_bundle.js?v=1">
+</head>
+<body>
+  <script type="module">
+    import init from "/yew-mobile/js/pve-yew-mobile-gui_bundle.js?v=1";
+    function set_cookie(value) { document.cookie = value; }
+    init(null);
+  </script>
+</body>
+</html>
+"""
+
 # 模拟 PVE 9.2.6 的 /proxmoxlib.js 响应：包含 pwt authSet（参数 20 空格缩进）与
 # authClear（参数 16 空格缩进）两处 Secure=true 的 auth cookie 写入，另加一个同
-# 缩进但不同上下文的非 auth cookie 写入（PVELangCookie），用于验证 sub_filter
-# 带上下文匹配、不会误替换。
+# 缩进但不同上下文的非 auth cookie 写入（PVELangCookie），用于验证 0.1.7 兜底
+# sub_filter 带上下文匹配、不会误替换。
 PROXMOXLIB_JS = """\
 /*
  * proxmox-widget-toolkit（本地验证用摘录，缩进与 PVE 9.2.6 线上一致）
@@ -119,7 +169,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _reply(self):
-        if self.path in ("/proxmoxlib.js", "/pve2/js/pvemanagerlib.js"):
+        if self.path == "/":
+            body = DESKTOP_INDEX.encode()
+            ctype = "text/html"
+        elif self.path == "/yew-mobile/":
+            body = YEW_MOBILE_INDEX.encode()
+            ctype = "text/html"
+        elif self.path in ("/proxmoxlib.js", "/pve2/js/pvemanagerlib.js"):
             body = PROXMOXLIB_JS.encode()
             ctype = "application/javascript"
         else:
@@ -157,7 +213,7 @@ echo "    后端已启动 pid=${BACKEND_PID}（https://127.0.0.1:8007，自签�
 
 # ---- 2. 模拟 fnOS 安装回调 ---------------------------------------------------
 echo
-echo "[2/7] 模拟 install_callback（TRIM_* 环境变量 + 向导输入）"
+echo "[2/8] 模拟 install_callback（TRIM_* 环境变量 + 向导输入）"
 export PVE_PILOT_DEV=1
 export TRIM_APPDEST="${APP_DEST}"
 export TRIM_PKGVAR="${WORK}/var"
@@ -176,7 +232,7 @@ echo "    nginx.conf 已生成"
 
 # ---- 3. §5 配置要点逐项核对 ---------------------------------------------------
 echo
-echo "[3/7] §5 透传配置要点逐项核对"
+echo "[3/8] §5 透传配置要点逐项核对"
 CONF="${TRIM_PKGVAR}/nginx.conf"
 checks=(
     "listen       8006;|透传端口 8006（纯 HTTP 单监听，无 ssl）"
@@ -186,6 +242,9 @@ checks=(
     "proxy_set_header  X-Forwarded-Proto \$scheme;|X-Forwarded-Proto 透传原始协议"
     "proxy_cookie_flags ~ nosecure;|剥离后端 Set-Cookie 的 Secure 标志（双保险）"
     "sub_filter_types application/javascript;|sub_filter_types 覆盖 JS 响应"
+    "sub_filter \"<head>\"|0.1.8 <head> 注入钩子 sub_filter"
+    "Object.defineProperty(Document.prototype,'cookie'|注入脚本覆盖 document.cookie setter"
+    "(v+';').replace(/;\\s*Secure\\s*(?=[;,])/gi|注入脚本剥离 Secure 的哨兵正则（无字面 \$）"
     "sub_filter \"Ext.util.Cookies.set(|sub_filter 改写 PVE 前端 JS cookie 写入"
     "sub_filter_once off;|sub_filter_once off（多处出现全部替换）"
     "proxy_set_header  Accept-Encoding \"\";|强制后端返回未压缩响应（否则 sub_filter 无法匹配压缩字节）"
@@ -228,12 +287,12 @@ echo "    [OK]   无 ssl 监听 / ssl_certificate / error_page 497（纯 HTTP �
 
 # ---- 4. nginx -t 配置校验 -----------------------------------------------------
 echo
-echo "[4/7] nginx -t 配置校验"
+echo "[4/8] nginx -t 配置校验"
 "${ROOT}/fnos/bin/nginx" -t -c "${CONF}" -p "${TRIM_PKGVAR}/" 2>&1 | sed 's/^/    /'
 
 # ---- 5. 启动 nginx 并端到端验证 ------------------------------------------------
 echo
-echo "[5/7] main start + 端到端透传（0.1.7 纯 HTTP 直连 + sub_filter 改写）"
+echo "[5/8] main start + 端到端透传（0.1.8 纯 HTTP 直连 + <head> 注入钩子 + 逐条兜底）"
 "${ROOT}/fnos/cmd/main" start
 NGINX_PID=$(cat "${TRIM_PKGVAR}/pvepilot.pid")
 "${ROOT}/fnos/cmd/main" status
@@ -250,6 +309,128 @@ echo "${RESP}" | grep -q '"Host": "test.fnos.net"' \
 echo "${RESP}" | grep -q '"path": "/pve/test"' \
     || { echo "FAIL: 根路径透传异常"; exit 1; }
 echo "    [OK] Host 头与路径透传正确（后端收到的 Host=客户端原始 Host）"
+
+echo "    curl http://127.0.0.1:8006/ → 桌面 index.html 的 <head> 后注入 document.cookie 钩子"
+RESP_DESKTOP="${WORK}/desktop.out"
+HTTP_DESKTOP_CODE=$(curl -s -o "${RESP_DESKTOP}" -w '%{http_code}' --max-time 10 \
+    -H "Host: test.fnos.net" http://127.0.0.1:8006/ 2>/dev/null || true)
+[ "${HTTP_DESKTOP_CODE}" = "200" ] || { echo "FAIL: / 未 200（code=${HTTP_DESKTOP_CODE}）"; exit 1; }
+python3 - "${RESP_DESKTOP}" <<'PYEOF'
+import sys
+body = open(sys.argv[1], encoding="utf-8").read()
+required = [
+    "<head><script>(function(){",
+    "Object.getOwnPropertyDescriptor(Document.prototype,'cookie')",
+    "Object.defineProperty(Document.prototype,'cookie'",
+    "(v+';').replace(/;\\s*Secure\\s*(?=[;,])/gi,'').slice(0,-1)",
+    "configurable:true});})();</script>",
+    # 桌面页自身内容未被破坏
+    "pvemanagerlib.js",
+    "Proxmox Virtual Environment",
+]
+for pat in required:
+    if pat not in body:
+        print("FAIL: / 响应缺少期望片段: " + repr(pat[:60]))
+        sys.exit(1)
+print("    [OK] 桌面 / 响应已注入 <head> 钩子脚本，页面自身内容完整")
+PYEOF
+
+echo "    curl http://127.0.0.1:8006/yew-mobile/ → 移动 index.html 同样注入钩子"
+RESP_YEW="${WORK}/yew.out"
+HTTP_YEW_CODE=$(curl -s -o "${RESP_YEW}" -w '%{http_code}' --max-time 10 \
+    -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1" \
+    -H "Host: test.fnos.net" http://127.0.0.1:8006/yew-mobile/ 2>/dev/null || true)
+[ "${HTTP_YEW_CODE}" = "200" ] || { echo "FAIL: /yew-mobile/ 未 200（code=${HTTP_YEW_CODE}）"; exit 1; }
+python3 - "${RESP_YEW}" <<'PYEOF'
+import sys
+body = open(sys.argv[1], encoding="utf-8").read()
+required = [
+    "<head><script>(function(){",
+    "Object.getOwnPropertyDescriptor(Document.prototype,'cookie')",
+    # yew-mobile 自身内容未被破坏（WASM 预加载与 set_cookie JS 层）
+    "pve-yew-mobile-gui_bg.wasm",
+    "function set_cookie(value) { document.cookie = value; }",
+]
+for pat in required:
+    if pat not in body:
+        print("FAIL: /yew-mobile/ 响应缺少期望片段: " + repr(pat[:60]))
+        sys.exit(1)
+print("    [OK] 移动 /yew-mobile/ 响应已注入 <head> 钩子脚本，WASM/set_cookie 内容完整")
+PYEOF
+
+echo "    钩子逻辑验证：注入脚本对 \"; SameSite=Lax; Secure;\" 剥离 Secure、无 Secure 无副作用"
+INJECTED_JS="${WORK}/injected.js"
+python3 - "${RESP_DESKTOP}" "${INJECTED_JS}" <<'PYEOF'
+import re, sys
+body = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<script>(.*?)</script>", body, re.S)
+if not m:
+    print("FAIL: / 响应中未找到注入脚本")
+    sys.exit(1)
+open(sys.argv[2], "w", encoding="utf-8").write(m.group(1))
+PYEOF
+if command -v node >/dev/null 2>&1; then
+    node - "${INJECTED_JS}" <<'JS'
+const fs = require("fs");
+const js = fs.readFileSync(process.argv[2], "utf8");
+let stored = "";
+function Document() {}
+Object.defineProperty(Document.prototype, "cookie", {
+    configurable: true,
+    get: function () { return stored; },
+    set: function (v) { stored = v; },
+});
+global.Document = Document;
+const document = new Document();
+eval(js);
+const cases = [
+    ["; SameSite=Lax; Secure;", "; SameSite=Lax;"],
+    ["PVEAuthCookie=abc123; SameSite=Lax; Secure;", "PVEAuthCookie=abc123; SameSite=Lax;"],
+    ["a=1", "a=1"],
+    ["a=1; Path=/; HttpOnly", "a=1; Path=/; HttpOnly"],
+    ["a=1; Secure", "a=1"],
+    ["a=1; secure; Path=/", "a=1; Path=/"],
+    ["a=1; expires=Wed, 09 Jun 2021 10:18:14 GMT; Secure", "a=1; expires=Wed, 09 Jun 2021 10:18:14 GMT"],
+];
+for (const [input, expected] of cases) {
+    document.cookie = input;
+    if (document.cookie !== expected) {
+        console.error("FAIL: " + JSON.stringify(input) + " -> " + JSON.stringify(document.cookie)
+            + ", expected " + JSON.stringify(expected));
+        process.exit(1);
+    }
+}
+console.log("    [OK] 注入钩子逻辑验证通过（node 执行真实注入脚本）");
+JS
+else
+    python3 - "${INJECTED_JS}" <<'PYEOF'
+import re, sys
+js = open(sys.argv[1], encoding="utf-8").read()
+# 提取注入脚本里的剥离正则（哨兵写法），用 python 等价复现 (v+';') + 剥离 + 去哨兵
+m = re.search(r"/([^/]*)/gi", js)
+if not m:
+    print("FAIL: 未在注入脚本中找到剥离正则")
+    sys.exit(1)
+pat = m.group(1)
+def strip(v):
+    return re.sub(pat, "", v + ";", flags=re.I)[:-1]
+cases = [
+    ("; SameSite=Lax; Secure;", "; SameSite=Lax;"),
+    ("PVEAuthCookie=abc123; SameSite=Lax; Secure;", "PVEAuthCookie=abc123; SameSite=Lax;"),
+    ("a=1", "a=1"),
+    ("a=1; Path=/; HttpOnly", "a=1; Path=/; HttpOnly"),
+    ("a=1; Secure", "a=1"),
+    ("a=1; secure; Path=/", "a=1; Path=/"),
+    ("a=1; expires=Wed, 09 Jun 2021 10:18:14 GMT; Secure", "a=1; expires=Wed, 09 Jun 2021 10:18:14 GMT"),
+]
+for inp, exp in cases:
+    got = strip(inp)
+    if got != exp:
+        print("FAIL: %r -> %r, expected %r" % (inp, got, exp))
+        sys.exit(1)
+print("    [OK] 注入钩子逻辑验证通过（python 模拟注入脚本中的正则）")
+PYEOF
+fi
 
 echo "    curl http://127.0.0.1:8006/proxmoxlib.js → sub_filter 把 Secure 参数改写为 false"
 RESP_JS="${WORK}/proxmoxlib.out"
@@ -287,7 +468,7 @@ echo "    [OK] 纯 HTTP 直连 200 + sub_filter 改写生效（http 请求无 30
 
 # ---- 6. config_callback 重写配置并重启 -----------------------------------------
 echo
-echo "[6/7] config_callback（改监听端口 8801 并重启）"
+echo "[6/8] config_callback（改监听端口 8801 并重启）"
 export wizard_pve_addr="127.0.0.1"
 export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
@@ -308,7 +489,7 @@ fi
 
 # ---- 7. main stop/restart/log ---------------------------------------------------
 echo
-echo "[7/7] main stop / restart / log"
+echo "[7/8] main stop / restart / log"
 "${ROOT}/fnos/cmd/main" restart
 "${ROOT}/fnos/cmd/main" stop
 sleep 1
@@ -320,7 +501,7 @@ fi
 
 # ---- 8. 其余生命周期回调冒烟测试 + 配置缺失兜底重建 ------------------------------
 echo
-echo "[8/8] 生命周期回调冒烟 + 配置缺失兜底重建"
+echo "[8/8] 生命周期回调冒烟 + 图标兜底 + 升级重建"
 export wizard_pve_addr="127.0.0.1"
 export wizard_pve_port="8007"
 export wizard_proxy_port="8801"
@@ -415,8 +596,9 @@ grep -q "dirty" "${APP_DEST}/ui/images/128.png" \
 "${ROOT}/fnos/cmd/main" stop >/dev/null 2>&1
 echo "    [OK]   service_prestart 兜底补齐且幂等（已存在尺寸不覆盖）"
 
-# 模拟 0.1.6 → 0.1.7 升级场景：旧配置为 ssl 监听 + error_page 497 跳转，升级后必须
-# 重建为 0.1.7 纯 HTTP + sub_filter 方案（否则 App WebView 黑屏/登录 401 依旧）
+# 模拟 0.1.6 及更早 → 0.1.8 升级场景：旧配置为 ssl 监听 + error_page 497 跳转，
+# 升级后必须重建为 0.1.8 纯 HTTP + sub_filter 方案（否则 App WebView 黑屏/登录
+# 401 依旧）
 cat > "${TRIM_PKGVAR}/nginx.conf" <<'OLDEOF'
 worker_processes auto;
 events {
@@ -437,12 +619,59 @@ http {
 OLDEOF
 "${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
 grep -qF "sub_filter_types" "${TRIM_PKGVAR}/nginx.conf" \
-    || { echo "FAIL: 0.1.6→0.1.7 升级未重建配置（无 sub_filter）"; exit 1; }
+    || { echo "FAIL: 0.1.6 及更早升级未重建配置（无 sub_filter）"; exit 1; }
+grep -qF 'sub_filter "<head>"' "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 升级重建后缺 <head> 注入钩子"; exit 1; }
 grep -qF "error_page" "${TRIM_PKGVAR}/nginx.conf" \
     && { echo "FAIL: 升级重建后仍残留 error_page 497"; exit 1; }
 grep -qF "listen       8801;" "${TRIM_PKGVAR}/nginx.conf" \
     || { echo "FAIL: 升级重建后监听端口丢失"; exit 1; }
-echo "    [OK]   0.1.6→0.1.7 升级：旧 ssl/497 配置自动重建为纯 HTTP + sub_filter（保留 8801）"
+echo "    [OK]   0.1.6 及更早升级：旧 ssl/497 配置自动重建为 0.1.8 方案（<head> 注入钩子 + 逐条兜底，保留 8801）"
+
+# 模拟 0.1.7 → 0.1.8 升级场景：旧配置已有 sub_filter_types 与逐条 authSet/authClear
+# 匹配，但缺 <head> 注入钩子（无法覆盖 yew-mobile WASM 等非逐条匹配的 cookie 写入），
+# 升级后必须重建为 0.1.8 两层方案
+cat > "${TRIM_PKGVAR}/nginx.conf" <<'OLDEOF'
+worker_processes auto;
+events {
+    worker_connections 1024;
+}
+http {
+    server {
+        listen       8801;
+        server_name  _;
+        location / {
+            proxy_pass        https://127.0.0.1:8007;
+            proxy_set_header  Host $host;
+            proxy_cookie_flags ~ nosecure;
+            sub_filter_types application/javascript;
+            sub_filter "Ext.util.Cookies.set(
+                    Proxmox.Setup.auth_cookie_name,
+                    data.ticket,
+                    null,
+                    '/',
+                    null,
+                    true," "Ext.util.Cookies.set(
+                    Proxmox.Setup.auth_cookie_name,
+                    data.ticket,
+                    null,
+                    '/',
+                    null,
+                    false,";
+            sub_filter_once off;
+            proxy_set_header  Accept-Encoding "";
+        }
+    }
+}
+OLDEOF
+"${ROOT}/fnos/cmd/upgrade_callback" >/dev/null 2>&1
+grep -qF 'sub_filter "<head>"' "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 0.1.7→0.1.8 升级未重建配置（缺 <head> 注入钩子）"; exit 1; }
+grep -qF "sub_filter \"Ext.util.Cookies.set(" "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 升级重建后逐条兜底 sub_filter 丢失"; exit 1; }
+grep -qF "listen       8801;" "${TRIM_PKGVAR}/nginx.conf" \
+    || { echo "FAIL: 升级重建后监听端口丢失"; exit 1; }
+echo "    [OK]   0.1.7→0.1.8 升级：旧配置自动重建为 <head> 注入钩子 + 逐条兜底两层方案（保留 8801）"
 
 # 模拟升级后配置丢失：删除 nginx.conf，main start 应从 settings 兜底重建
 rm -f "${TRIM_PKGVAR}/nginx.conf"
